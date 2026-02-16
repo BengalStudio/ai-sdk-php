@@ -167,11 +167,126 @@ class StreamTextResultTest extends TestCase
         $toolStartIndex = array_search('tool-input-start', $types);
         $this->assertLessThan($toolStartIndex, $textEndIndex);
 
+        // Tool output should come BEFORE finish-step (within the step)
+        $toolOutputIndex = array_search('tool-output-available', $types);
+        $finishStepIndex = array_search('finish-step', $types);
+        $this->assertLessThan($finishStepIndex, $toolOutputIndex);
+
         // Tool output should have the result
         $toolOutputs = array_filter($events, fn($e) => $e['type'] === 'tool-output-available');
         $toolOutput = array_values($toolOutputs)[0];
         $this->assertSame('call_123', $toolOutput['toolCallId']);
         $this->assertSame(['temp' => 72], $toolOutput['output']);
+    }
+
+    public function testToUIMessageStreamResponseHandlesModelToolInputStart(): void
+    {
+        // Simulates model-level tool input streaming events
+        // (tool-input-start, tool-input-delta, tool-call)
+        $result = $this->createStreamResult([
+            [
+                'type' => 'tool-input-start',
+                'id' => 'call_456',
+                'toolName' => 'getWeather',
+                'step' => 0,
+            ],
+            [
+                'type' => 'tool-input-delta',
+                'id' => 'call_456',
+                'delta' => '{"city"',
+                'step' => 0,
+            ],
+            [
+                'type' => 'tool-input-delta',
+                'id' => 'call_456',
+                'delta' => ':"NYC"}',
+                'step' => 0,
+            ],
+            [
+                'type' => 'tool-call',
+                'toolCallId' => 'call_456',
+                'toolName' => 'getWeather',
+                'args' => ['city' => 'NYC'],
+                'step' => 0,
+            ],
+            [
+                'type' => 'tool-result',
+                'toolCallId' => 'call_456',
+                'result' => 'sunny',
+                'step' => 0,
+            ],
+            ['type' => 'step-finish', 'step' => 0],
+            ['type' => 'finish', 'totalUsage' => new LanguageModelUsage(10, 5)],
+        ]);
+
+        $outputFile = tmpfile();
+        $result->toUIMessageStreamResponse(output: $outputFile);
+
+        fseek($outputFile, 0);
+        $output = stream_get_contents($outputFile);
+        fclose($outputFile);
+
+        $events = $this->parseSSEEvents($output);
+        $types = array_column($events, 'type');
+
+        // Should have tool-input-start only once (from the model event,
+        // NOT duplicated by the tool-call handler)
+        $toolStartEvents = array_filter($events, fn($e) => $e['type'] === 'tool-input-start');
+        $this->assertCount(1, $toolStartEvents);
+
+        // Should have tool-input-delta events
+        $toolDeltas = array_filter($events, fn($e) => $e['type'] === 'tool-input-delta');
+        $this->assertCount(2, $toolDeltas);
+        $deltas = array_values($toolDeltas);
+        $this->assertSame('{"city"', $deltas[0]['inputTextDelta']);
+        $this->assertSame(':"NYC"}', $deltas[1]['inputTextDelta']);
+
+        // Should have tool-input-available with decoded args
+        $toolAvailable = array_values(array_filter(
+            $events, fn($e) => $e['type'] === 'tool-input-available'
+        ));
+        $this->assertCount(1, $toolAvailable);
+        $this->assertSame(['city' => 'NYC'], $toolAvailable[0]['input']);
+
+        // Should have tool-output-available
+        $this->assertContains('tool-output-available', $types);
+
+        // Ordering: tool-output-available before finish-step
+        $toolOutputIndex = array_search('tool-output-available', $types);
+        $finishStepIndex = array_search('finish-step', $types);
+        $this->assertLessThan($finishStepIndex, $toolOutputIndex);
+    }
+
+    public function testToUIMessageStreamResponseToolInputAvailableHasDecodedArgs(): void
+    {
+        // When tool-call event has args already decoded (from StreamText)
+        $result = $this->createStreamResult([
+            [
+                'type' => 'tool-call',
+                'toolCallId' => 'call_789',
+                'toolName' => 'search',
+                'args' => ['query' => 'test', 'limit' => 10],
+                'step' => 0,
+            ],
+            ['type' => 'step-finish', 'step' => 0],
+            ['type' => 'finish', 'totalUsage' => new LanguageModelUsage(5, 3)],
+        ]);
+
+        $outputFile = tmpfile();
+        $result->toUIMessageStreamResponse(output: $outputFile);
+
+        fseek($outputFile, 0);
+        $output = stream_get_contents($outputFile);
+        fclose($outputFile);
+
+        $events = $this->parseSSEEvents($output);
+
+        // tool-input-available should have the full decoded args
+        $toolAvailable = array_values(array_filter(
+            $events, fn($e) => $e['type'] === 'tool-input-available'
+        ));
+        $this->assertCount(1, $toolAvailable);
+        $this->assertSame(['query' => 'test', 'limit' => 10], $toolAvailable[0]['input']);
     }
 
     public function testToUIMessageStreamResponseWithMessageMetadata(): void

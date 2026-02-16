@@ -314,6 +314,7 @@ class StreamTextResult
         $inTextBlock = false;
         $messageSent = false;
         $stepOpen = false;
+        $toolInputStarted = []; // Track tool calls that had tool-input-start sent
 
         try {
             foreach ($this->getFullStream() as $chunk) {
@@ -389,6 +390,45 @@ class StreamTextResult
                         $this->writeSSE($output, $chunk);
                         break;
 
+                    case 'tool-input-start':
+                        // Model-level tool input streaming start.
+                        // Close text block if open
+                        if ($inTextBlock) {
+                            $this->writeSSE($output, [
+                                'type' => 'text-end',
+                                'id' => $textBlockId,
+                            ]);
+                            $inTextBlock = false;
+                        }
+
+                        if (!$stepOpen) {
+                            $this->writeSSE($output, ['type' => 'start-step']);
+                            $stepOpen = true;
+                        }
+
+                        $tcId = $chunk['toolCallId'] ?? $chunk['id'] ?? '';
+                        $toolInputStarted[$tcId] = true;
+                        $this->writeSSE($output, [
+                            'type' => 'tool-input-start',
+                            'toolCallId' => $tcId,
+                            'toolName' => $chunk['toolName'] ?? '',
+                        ]);
+                        break;
+
+                    case 'tool-input-delta':
+                    case 'tool-call-delta':
+                        // Model-level tool input streaming delta.
+                        if (!$stepOpen) {
+                            $this->writeSSE($output, ['type' => 'start-step']);
+                            $stepOpen = true;
+                        }
+                        $this->writeSSE($output, [
+                            'type' => 'tool-input-delta',
+                            'toolCallId' => $chunk['toolCallId'] ?? $chunk['id'] ?? '',
+                            'inputTextDelta' => $chunk['inputTextDelta'] ?? $chunk['delta'] ?? $chunk['argsTextDelta'] ?? '',
+                        ]);
+                        break;
+
                     case 'tool-call':
                         // Close text block if open
                         if ($inTextBlock) {
@@ -408,29 +448,22 @@ class StreamTextResult
                         $toolName = $chunk['toolName'] ?? '';
                         $args = $chunk['args'] ?? [];
 
-                        // Send tool input complete (available)
-                        $this->writeSSE($output, [
-                            'type' => 'tool-input-start',
-                            'toolCallId' => $toolCallId,
-                            'toolName' => $toolName,
-                        ]);
+                        // Only send tool-input-start if not already sent
+                        // by model-level streaming events.
+                        if (!isset($toolInputStarted[$toolCallId])) {
+                            $this->writeSSE($output, [
+                                'type' => 'tool-input-start',
+                                'toolCallId' => $toolCallId,
+                                'toolName' => $toolName,
+                            ]);
+                        }
+
+                        // Send tool-input-available (marks input complete)
                         $this->writeSSE($output, [
                             'type' => 'tool-input-available',
                             'toolCallId' => $toolCallId,
                             'toolName' => $toolName,
                             'input' => $args,
-                        ]);
-                        break;
-
-                    case 'tool-call-delta':
-                        if (!$stepOpen) {
-                            $this->writeSSE($output, ['type' => 'start-step']);
-                            $stepOpen = true;
-                        }
-                        $this->writeSSE($output, [
-                            'type' => 'tool-input-delta',
-                            'toolCallId' => $chunk['toolCallId'] ?? '',
-                            'inputTextDelta' => $chunk['inputTextDelta'] ?? $chunk['argsTextDelta'] ?? '',
                         ]);
                         break;
 

@@ -250,11 +250,15 @@ class StreamText
 
                     case 'tool-call':
                         $toolCalls[] = $chunk;
+                        // Decode input: models yield 'input' as a JSON string,
+                        // but consumers expect a decoded array under 'args'.
+                        $rawInput = $chunk['input'] ?? $chunk['args'] ?? [];
+                        $decodedInput = is_string($rawInput) ? json_decode($rawInput, true) : $rawInput;
                         yield [
                             'type' => 'tool-call',
                             'toolCallId' => $chunk['toolCallId'] ?? '',
                             'toolName' => $chunk['toolName'] ?? '',
-                            'args' => $chunk['args'] ?? [],
+                            'args' => $decodedInput,
                             'step' => $step,
                         ];
                         if ($this->onChunk !== null) {
@@ -272,12 +276,9 @@ class StreamText
                     case 'finish':
                         $finishReason = $chunk['finishReason'] ?? null;
                         $usage = $chunk['usage'] ?? null;
-                        yield [
-                            'type' => 'step-finish',
-                            'step' => $step,
-                            'finishReason' => $finishReason,
-                            'usage' => $usage,
-                        ];
+                        // Don't yield step-finish here — defer until after
+                        // tool execution so tool-result events fall within
+                        // the step (required by Data Stream Protocol).
                         break;
 
                     default:
@@ -310,6 +311,15 @@ class StreamText
                     }
                 }
             }
+
+            // Yield step-finish AFTER tool execution so that
+            // tool-result events fall within the step.
+            yield [
+                'type' => 'step-finish',
+                'step' => $step,
+                'finishReason' => $finishReason,
+                'usage' => $usage,
+            ];
 
             // Notify step finish
             if ($this->onStepFinish !== null) {
