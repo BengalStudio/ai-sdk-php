@@ -130,11 +130,17 @@ class StreamTextResult
         }
 
         if ($clearBuffers) {
-            // Clear all output buffers that may have been opened by
+            // Discard all output buffers that may have been opened by
             // WordPress, PHP, or any other framework/middleware.
+            // Use ob_end_clean() (not ob_end_flush()) to avoid sending
+            // stale buffered content before our SSE headers.
             while (ob_get_level() > 0) {
-                ob_end_flush();
+                ob_end_clean();
             }
+
+            // Auto-flush after every output operation so each SSE event
+            // is pushed through php-fpm/fastcgi immediately.
+            ob_implicit_flush(true);
         }
     }
 
@@ -155,6 +161,8 @@ class StreamTextResult
 
         // Disable nginx/proxy buffering
         header('X-Accel-Buffering: no');
+        // Prevent gzip/brotli compression which buffers multiple chunks
+        header('Content-Encoding: none');
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -203,11 +211,17 @@ class StreamTextResult
             } else {
                 fwrite($output, $textDelta);
             }
+            if (ob_get_level() > 0) {
+                ob_flush();
+            }
             flush();
         }
 
         if ($format === 'sse') {
             fwrite($output, "data: [DONE]\n\n");
+            if (ob_get_level() > 0) {
+                ob_flush();
+            }
             flush();
         }
     }
@@ -248,6 +262,9 @@ class StreamTextResult
 
         foreach ($this->getTextStream() as $textDelta) {
             fwrite($output, $textDelta);
+            if (ob_get_level() > 0) {
+                ob_flush();
+            }
             flush();
         }
     }
@@ -553,6 +570,9 @@ class StreamTextResult
 
         // Terminate the stream
         fwrite($output, "data: [DONE]\n\n");
+        if (ob_get_level() > 0) {
+            ob_flush();
+        }
         flush();
     }
 
@@ -565,6 +585,12 @@ class StreamTextResult
     private function writeSSE($output, array $data): void
     {
         fwrite($output, "data: " . json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n\n");
+        // ob_flush() pushes data from PHP's output buffer to the SAPI layer;
+        // flush() pushes it from the SAPI layer to the web server.
+        // Both are needed when ob_implicit_flush is not active (e.g. tests).
+        if (ob_get_level() > 0) {
+            ob_flush();
+        }
         flush();
     }
 
