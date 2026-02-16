@@ -8,6 +8,7 @@ use BengalStudio\AI\Contracts\LanguageModel;
 use BengalStudio\AI\Exceptions\NoObjectGeneratedException;
 use BengalStudio\AI\Prompt\CallSettings;
 use BengalStudio\AI\Prompt\PromptConverter;
+use BengalStudio\AI\Types\FinishReason;
 use BengalStudio\AI\Types\LanguageModelCallOptions;
 use BengalStudio\AI\Util\Retry;
 
@@ -184,7 +185,7 @@ class GenerateObject
         $generateResult = new GenerateObjectResult(
             object: $object,
             rawText: $text,
-            finishReason: $result->finishReason,
+            finishReason: FinishReason::tryFrom($result->finishReason) ?? FinishReason::Unknown,
             usage: $result->usage,
             warnings: $result->warnings ?? [],
             response: $result->response,
@@ -242,7 +243,7 @@ class GenerateObject
         $generateResult = new GenerateObjectResult(
             object: $object,
             rawText: json_encode($object),
-            finishReason: $result->finishReason,
+            finishReason: FinishReason::tryFrom($result->finishReason) ?? FinishReason::Unknown,
             usage: $result->usage,
             warnings: $result->warnings ?? [],
             response: $result->response,

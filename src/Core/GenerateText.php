@@ -11,6 +11,7 @@ use BengalStudio\AI\Tool\Tool;
 use BengalStudio\AI\Tool\ToolCall;
 use BengalStudio\AI\Tool\ToolPreparer;
 use BengalStudio\AI\Tool\ToolResult;
+use BengalStudio\AI\Types\FinishReason;
 use BengalStudio\AI\Types\LanguageModelCallOptions;
 use BengalStudio\AI\Types\LanguageModelUsage;
 use BengalStudio\AI\Types\Message;
@@ -221,7 +222,7 @@ class GenerateText
                 text: $result->getText(),
                 toolCalls: array_map(fn($tc) => ToolCall::fromContentPart($tc), $toolCalls),
                 toolResults: $toolResults,
-                finishReason: $result->finishReason,
+                finishReason: FinishReason::tryFrom($result->finishReason) ?? FinishReason::Unknown,
                 usage: $result->usage,
                 warnings: $result->warnings ?? [],
                 response: $result->response,
