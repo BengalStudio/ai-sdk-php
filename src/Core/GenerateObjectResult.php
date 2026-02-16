@@ -61,11 +61,7 @@ class GenerateObjectResult
         return [
             'object' => $this->object,
             'finishReason' => $this->finishReason->value,
-            'usage' => [
-                'promptTokens' => $this->usage->promptTokens,
-                'completionTokens' => $this->usage->completionTokens,
-                'totalTokens' => $this->usage->total(),
-            ],
+            'usage' => $this->usage->toArray(),
         ];
     }
 

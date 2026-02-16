@@ -34,7 +34,7 @@ class GenerateTextResult
         public readonly array $steps,
         public readonly LanguageModelUsage $totalUsage,
     ) {
-        $lastStep = end($this->steps) ?: null;
+        $lastStep = !empty($this->steps) ? $this->steps[array_key_last($this->steps)] : null;
 
         $this->text = $lastStep?->text ?? '';
         $this->finishReason = $lastStep?->finishReason ?? FinishReason::Unknown;
@@ -86,11 +86,7 @@ class GenerateTextResult
             'finishReason' => $this->finishReason->value,
             'toolCalls' => array_map(fn(ToolCall $tc) => $tc->toArray(), $this->toolCalls),
             'toolResults' => array_map(fn(ToolResult $tr) => $tr->toArray(), $this->toolResults),
-            'usage' => [
-                'promptTokens' => $this->totalUsage->promptTokens,
-                'completionTokens' => $this->totalUsage->completionTokens,
-                'totalTokens' => $this->totalUsage->total(),
-            ],
+            'usage' => $this->totalUsage->toArray(),
             'steps' => array_map(fn(StepResult $s) => $s->toArray(), $this->steps),
         ];
     }

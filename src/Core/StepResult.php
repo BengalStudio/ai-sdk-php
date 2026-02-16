@@ -40,10 +40,7 @@ class StepResult
             'toolCalls' => array_map(fn(ToolCall $tc) => $tc->toArray(), $this->toolCalls),
             'toolResults' => array_map(fn(ToolResult $tr) => $tr->toArray(), $this->toolResults),
             'finishReason' => $this->finishReason->value,
-            'usage' => [
-                'promptTokens' => $this->usage->promptTokens,
-                'completionTokens' => $this->usage->completionTokens,
-            ],
+            'usage' => $this->usage->toArray(),
         ];
     }
 }
