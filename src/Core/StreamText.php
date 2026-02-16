@@ -304,7 +304,7 @@ class StreamText
                             'type' => 'tool-result',
                             'toolCallId' => $toolResult->toolCallId,
                             'toolName' => $toolResult->toolName,
-                            'result' => $toolResult->result,
+                            'result' => $toolResult->output,
                             'step' => $step,
                         ];
                     }
