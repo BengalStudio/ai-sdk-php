@@ -18,9 +18,11 @@ use BengalStudio\AI\Core\StreamObject;
 use BengalStudio\AI\Core\StreamObjectResult;
 use BengalStudio\AI\Core\StreamText;
 use BengalStudio\AI\Core\StreamTextResult;
+use BengalStudio\AI\Prompt\UIMessage;
 use BengalStudio\AI\Registry\CustomProvider;
 use BengalStudio\AI\Registry\ProviderRegistry;
 use BengalStudio\AI\Tool\Tool;
+use BengalStudio\AI\Types\Message;
 
 /**
  * Generate text and call tools for a given prompt using a language model.
@@ -297,4 +299,200 @@ function cosineSimilarity(array $a, array $b): float
     }
 
     return $dotProduct / ($normA * $normB);
+}
+
+/**
+ * Convert UI messages from @ai-sdk/react to model messages for AI SDK PHP.
+ *
+ * This function takes the UIMessage format sent by the `useChat` hook
+ * from `@ai-sdk/react` and converts it into the `Message` format that
+ * `generateText()` and `streamText()` accept.
+ *
+ * Mirrors the TypeScript `convertToModelMessages()` function from the Vercel AI SDK.
+ *
+ * @param array $uiMessages Array of UIMessage arrays (decoded from JSON), or UIMessage objects.
+ *                          Each message has: id, role, parts[{type, text, ...}].
+ * @return Message[] Array of model messages ready for generateText()/streamText().
+ *
+ * @example
+ * ```php
+ * use function BengalStudio\AI\convertToModelMessages;
+ * use function BengalStudio\AI\streamText;
+ *
+ * // In a WordPress REST API callback:
+ * $input = $request->get_json_params();
+ * $uiMessages = $input['messages'] ?? [];
+ *
+ * $result = streamText([
+ *     'model'    => $model,
+ *     'messages' => convertToModelMessages($uiMessages),
+ * ]);
+ *
+ * $result->toUIMessageStreamResponse();
+ * exit;
+ * ```
+ */
+function convertToModelMessages(array $uiMessages): array
+{
+    $modelMessages = [];
+
+    foreach ($uiMessages as $msg) {
+        $uiMessage = $msg instanceof UIMessage
+            ? $msg
+            : UIMessage::fromArray($msg);
+
+        switch ($uiMessage->role) {
+            case 'system':
+                $text = $uiMessage->getTextContent();
+                if ($text !== '') {
+                    $modelMessages[] = Message::system($text);
+                }
+                break;
+
+            case 'user':
+                $content = convertUserMessageContent($uiMessage);
+                if ($content !== null) {
+                    $modelMessages[] = Message::user($content);
+                }
+                break;
+
+            case 'assistant':
+                $result = convertAssistantMessage($uiMessage);
+                foreach ($result as $message) {
+                    $modelMessages[] = $message;
+                }
+                break;
+        }
+    }
+
+    return $modelMessages;
+}
+
+/**
+ * Convert a user UIMessage to model message content.
+ *
+ * Handles text parts and file/image parts (multi-modal messages).
+ *
+ * @param UIMessage $uiMessage
+ * @return string|array|null Content for Message::user().
+ *
+ * @internal
+ */
+function convertUserMessageContent(UIMessage $uiMessage): string|array|null
+{
+    $textParts = $uiMessage->getPartsByType('text');
+    $fileParts = $uiMessage->getPartsByType('file');
+
+    // If no file parts, return simple text string
+    if (empty($fileParts)) {
+        $text = implode('', array_map(fn($p) => $p['text'] ?? '', $textParts));
+        return $text !== '' ? $text : null;
+    }
+
+    // Multi-modal: return an array of content parts
+    $content = [];
+
+    foreach ($uiMessage->parts as $part) {
+        $type = $part['type'] ?? '';
+
+        if ($type === 'text' && ($part['text'] ?? '') !== '') {
+            $content[] = ['type' => 'text', 'text' => $part['text']];
+        } elseif ($type === 'file') {
+            $mediaType = $part['mediaType'] ?? '';
+
+            if (str_starts_with($mediaType, 'image/')) {
+                $content[] = [
+                    'type' => 'image',
+                    'image' => $part['url'] ?? '',
+                    'mimeType' => $mediaType,
+                ];
+            } else {
+                $content[] = [
+                    'type' => 'file',
+                    'data' => $part['url'] ?? '',
+                    'mimeType' => $mediaType,
+                ];
+            }
+        }
+    }
+
+    return !empty($content) ? $content : null;
+}
+
+/**
+ * Convert an assistant UIMessage to model messages.
+ *
+ * An assistant message may contain text and tool invocations.
+ * Tool invocations with state 'result' also generate a separate
+ * tool result message.
+ *
+ * @param UIMessage $uiMessage
+ * @return Message[] One or more messages (assistant + optional tool results).
+ *
+ * @internal
+ */
+function convertAssistantMessage(UIMessage $uiMessage): array
+{
+    $messages = [];
+    $assistantContent = [];
+    $toolResults = [];
+
+    foreach ($uiMessage->parts as $part) {
+        $type = $part['type'] ?? '';
+
+        if ($type === 'text' && ($part['text'] ?? '') !== '') {
+            $assistantContent[] = [
+                'type' => 'text',
+                'text' => $part['text'],
+            ];
+        } elseif ($type === 'tool-invocation') {
+            $toolCallId = $part['toolInvocationId'] ?? $part['toolCallId'] ?? '';
+            $toolName = $part['toolName'] ?? '';
+            $input = $part['input'] ?? $part['args'] ?? [];
+
+            $assistantContent[] = [
+                'type' => 'tool-call',
+                'toolCallId' => $toolCallId,
+                'toolName' => $toolName,
+                'input' => $input,
+            ];
+
+            // If the tool invocation has a result, collect it for a tool message
+            $state = $part['state'] ?? '';
+            if ($state === 'result' && array_key_exists('output', $part)) {
+                $toolResults[] = [
+                    'type' => 'tool-result',
+                    'toolCallId' => $toolCallId,
+                    'toolName' => $toolName,
+                    'result' => is_string($part['output']) ? $part['output'] : json_encode($part['output']),
+                ];
+            }
+        }
+    }
+
+    // Build assistant message
+    if (!empty($assistantContent)) {
+        // If only text, use simple string form
+        $hasNonText = false;
+        foreach ($assistantContent as $c) {
+            if ($c['type'] !== 'text') {
+                $hasNonText = true;
+                break;
+            }
+        }
+
+        if (!$hasNonText) {
+            $text = implode('', array_map(fn($c) => $c['text'], $assistantContent));
+            $messages[] = Message::assistant($text);
+        } else {
+            $messages[] = Message::assistant($assistantContent);
+        }
+    }
+
+    // Build tool result message
+    if (!empty($toolResults)) {
+        $messages[] = Message::tool($toolResults);
+    }
+
+    return $messages;
 }

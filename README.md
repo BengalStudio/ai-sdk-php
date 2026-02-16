@@ -84,6 +84,82 @@ foreach ($result->getTextStream() as $delta) {
 $result->pipeTextStreamToResponse(format: 'sse');
 ```
 
+#### Streaming with `@ai-sdk/react`
+
+The SDK supports both stream protocols used by the Vercel AI SDK React hooks.
+
+**Data Stream Protocol** (default for `useChat`):
+
+```php
+use function BengalStudio\AI\streamText;
+use function BengalStudio\AI\convertToModelMessages;
+
+// In your API endpoint (e.g. WordPress REST API):
+$input = $request->get_json_params();
+$uiMessages = $input['messages'] ?? [];
+
+$result = streamText([
+    'model'    => $model,
+    'messages' => convertToModelMessages($uiMessages),
+]);
+
+// Returns a Data Stream Protocol response compatible with useChat():
+$result->toUIMessageStreamResponse();
+exit; // Required in WordPress/framework contexts
+```
+
+Frontend (React):
+```jsx
+import { useChat } from '@ai-sdk/react';
+
+// Data stream is the default — no special transport needed:
+const { messages, sendMessage } = useChat();
+```
+
+**Text Stream Protocol** (for `TextStreamChatTransport`):
+
+```php
+$result = streamText([
+    'model'  => $model,
+    'prompt' => 'Hello!',
+]);
+
+$result->toTextStreamResponse();
+exit;
+```
+
+Frontend (React):
+```jsx
+import { useChat } from '@ai-sdk/react';
+import { TextStreamChatTransport } from 'ai';
+
+const { messages, sendMessage } = useChat({
+    transport: new TextStreamChatTransport({ api: '/api/chat' }),
+});
+```
+
+**`toUIMessageStreamResponse` options:**
+
+```php
+$result->toUIMessageStreamResponse([
+    // Attach metadata to events (e.g. usage info)
+    'messageMetadata' => function (array $part) {
+        if ($part['type'] === 'finish') {
+            return ['totalTokens' => $part['totalUsage']['totalTokens'] ?? 0];
+        }
+        return null;
+    },
+    // Forward reasoning tokens from models like deepseek-r1
+    'sendReasoning' => true,
+    // Forward source references
+    'sendSources' => true,
+    // Custom error message handler
+    'onError' => function (\Throwable $e) {
+        return 'Something went wrong.';
+    },
+]);
+```
+
 ### `generateObject`
 
 Generate structured data conforming to a JSON Schema.
@@ -193,6 +269,40 @@ $similarity = cosineSimilarity(
 );
 echo "Similarity: $similarity";
 ```
+
+## Converting UI Messages
+
+When using `@ai-sdk/react`'s `useChat` hook, the frontend sends messages in `UIMessage` format. Use `convertToModelMessages()` to convert them to model messages:
+
+```php
+use function BengalStudio\AI\convertToModelMessages;
+use function BengalStudio\AI\streamText;
+
+// The frontend sends messages as JSON:
+// [
+//   { "id": "msg_1", "role": "user", "parts": [{ "type": "text", "text": "Hello" }] },
+//   { "id": "msg_2", "role": "assistant", "parts": [{ "type": "text", "text": "Hi!" }] },
+//   { "id": "msg_3", "role": "user", "parts": [{ "type": "text", "text": "What's AI?" }] }
+// ]
+
+$input = $request->get_json_params(); // or json_decode(file_get_contents('php://input'), true)
+$uiMessages = $input['messages'] ?? [];
+
+$result = streamText([
+    'model'    => $model,
+    'system'   => 'You are a helpful assistant.',
+    'messages' => convertToModelMessages($uiMessages),
+]);
+
+$result->toUIMessageStreamResponse();
+exit;
+```
+
+The converter handles:
+- **Text parts** → string content for user/assistant messages
+- **Tool invocations** → tool-call content parts for assistant messages + tool-result messages
+- **File/image parts** → multi-modal content parts for user messages
+- **System messages** → system messages
 
 ## Tools
 
@@ -357,18 +467,22 @@ src/
 
 ## API Mapping
 
-| Vercel AI SDK (TypeScript)  | AI SDK PHP                              |
-|-----------------------------|-----------------------------------------|
-| `generateText()`           | `BengalStudio\AI\generateText()`       |
-| `streamText()`             | `BengalStudio\AI\streamText()`         |
-| `generateObject()`         | `BengalStudio\AI\generateObject()`     |
-| `streamObject()`           | `BengalStudio\AI\streamObject()`       |
-| `embed()`                  | `BengalStudio\AI\embed()`             |
-| `embedMany()`              | `BengalStudio\AI\embedMany()`         |
-| `tool()`                   | `BengalStudio\AI\tool()`              |
-| `createProviderRegistry()` | `BengalStudio\AI\createProviderRegistry()` |
-| `customProvider()`         | `BengalStudio\AI\customProvider()`     |
-| `cosineSimilarity()`       | `BengalStudio\AI\cosineSimilarity()`   |
+| Vercel AI SDK (TypeScript)                        | AI SDK PHP                                          |
+|---------------------------------------------------|-----------------------------------------------------|
+| `generateText()`                                  | `BengalStudio\AI\generateText()`                   |
+| `streamText()`                                    | `BengalStudio\AI\streamText()`                     |
+| `generateObject()`                                | `BengalStudio\AI\generateObject()`                 |
+| `streamObject()`                                  | `BengalStudio\AI\streamObject()`                   |
+| `embed()`                                         | `BengalStudio\AI\embed()`                          |
+| `embedMany()`                                     | `BengalStudio\AI\embedMany()`                      |
+| `tool()`                                          | `BengalStudio\AI\tool()`                           |
+| `convertToModelMessages()`                        | `BengalStudio\AI\convertToModelMessages()`         |
+| `createProviderRegistry()`                        | `BengalStudio\AI\createProviderRegistry()`         |
+| `customProvider()`                                | `BengalStudio\AI\customProvider()`                 |
+| `cosineSimilarity()`                              | `BengalStudio\AI\cosineSimilarity()`               |
+| `result.toUIMessageStreamResponse()`              | `$result->toUIMessageStreamResponse()`             |
+| `result.toTextStreamResponse()`                   | `$result->toTextStreamResponse()`                  |
+| `result.pipeTextStreamToResponse()` (Node)        | `$result->pipeTextStreamToResponse()`              |
 
 ## License
 
