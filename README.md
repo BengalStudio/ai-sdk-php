@@ -160,6 +160,52 @@ $result->toUIMessageStreamResponse([
 ]);
 ```
 
+**Tool Streaming with the Data Stream Protocol:**
+
+When tools are defined with `maxSteps > 1`, the stream automatically handles multi-step tool calling. Tool input is streamed incrementally and tool output appears within the same step:
+
+```
+start → start-step
+      → tool-input-start
+      → tool-input-delta (repeated)
+      → tool-input-available
+      → tool-output-available
+      → finish-step
+      → start-step
+      → text-start
+      → text-delta (repeated)
+      → text-end
+      → finish-step
+      → finish
+      → [DONE]
+```
+
+Example with tools:
+
+```php
+$result = streamText([
+    'model'    => $model,
+    'messages' => convertToModelMessages($messages),
+    'tools'    => [
+        'weather' => tool([
+            'description' => 'Get current weather for a city',
+            'parameters'  => [
+                'type' => 'object',
+                'properties' => [
+                    'city' => ['type' => 'string', 'description' => 'City name'],
+                ],
+                'required' => ['city'],
+            ],
+            'execute' => fn(array $args) => "72°F and sunny in {$args['city']}",
+        ]),
+    ],
+    'maxSteps' => 3,
+]);
+
+$result->toUIMessageStreamResponse();
+exit;
+```
+
 ### `generateObject`
 
 Generate structured data conforming to a JSON Schema.
