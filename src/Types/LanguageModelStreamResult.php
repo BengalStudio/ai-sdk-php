@@ -15,4 +15,12 @@ class LanguageModelStreamResult
     public function __construct(
         public readonly \Generator $stream,
     ) {}
+
+    /**
+     * Get the underlying stream generator.
+     */
+    public function getStream(): \Generator
+    {
+        return $this->stream;
+    }
 }
