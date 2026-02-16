@@ -111,12 +111,26 @@ class StreamTextResult
      * Pipe the text stream to a PHP output stream.
      *
      * Useful for Server-Sent Events (SSE) or chunked HTTP responses.
+     * This method clears all PHP output buffers and disables buffering
+     * to ensure each chunk is sent to the client immediately.
+     *
+     * IMPORTANT: When used inside a WordPress REST API callback or any
+     * framework that captures output, call exit() after this method
+     * to prevent the framework from sending its own response.
      *
      * @param resource|null $output Defaults to php://output if null.
      * @param string $format 'text' for plain text, 'sse' for Server-Sent Events.
      */
     public function pipeTextStreamToResponse($output = null, string $format = 'text'): void
     {
+        // Disable output compression that can buffer the stream
+        @ini_set('output_buffering', 'Off');
+        @ini_set('zlib.output_compression', false);
+
+        if (function_exists('apache_setenv')) {
+            @apache_setenv('no-gzip', '1');
+        }
+
         if ($output === null) {
             $output = fopen('php://output', 'w');
         }
@@ -131,6 +145,14 @@ class StreamTextResult
                 header('Content-Type: text/plain; charset=utf-8');
                 header('Transfer-Encoding: chunked');
             }
+            // Disable nginx/proxy buffering
+            header('X-Accel-Buffering: no');
+        }
+
+        // Clear all output buffers that may have been opened by
+        // WordPress, PHP, or any other framework/middleware.
+        while (ob_get_level() > 0) {
+            ob_end_flush();
         }
 
         foreach ($this->getTextStream() as $textDelta) {
@@ -139,15 +161,12 @@ class StreamTextResult
             } else {
                 fwrite($output, $textDelta);
             }
-
-            if (ob_get_level() > 0) {
-                ob_flush();
-            }
             flush();
         }
 
         if ($format === 'sse') {
             fwrite($output, "data: [DONE]\n\n");
+            flush();
         }
     }
 
