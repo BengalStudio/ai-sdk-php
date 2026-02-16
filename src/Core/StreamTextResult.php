@@ -165,6 +165,39 @@ class StreamTextResult
         header('Content-Encoding: none');
     }
 
+    /**
+     * Send SSE padding to prime the nginx/fastcgi buffer.
+     *
+     * Nginx's fastcgi_buffer_size (often 4-64KB) prevents small SSE events
+     * from reaching the client until the buffer fills. By sending a
+     * block of SSE comments (which are ignored by clients), we fill the
+     * initial buffer so subsequent events flow through immediately.
+     *
+     * This is a workaround for environments where nginx config can't be
+     * modified. The recommended solution is adding `fastcgi_buffering off;`
+     * to the nginx `location ~ \.php$` block.
+     *
+     * @param resource $output The output stream.
+     * @param int $bytes Number of padding bytes (default 64KB — matches common fastcgi_buffer_size).
+     */
+    private function sendSSEPadding($output, int $bytes = 65536): void
+    {
+        // SSE comment lines (starting with ':') are ignored by all clients
+        // including EventSource and @ai-sdk/react's fetch-based parser.
+        // Send in 4KB chunks to ensure each fwrite flushes through.
+        $chunkSize = 4096;
+        $remaining = $bytes;
+        while ($remaining > 0) {
+            $size = min($chunkSize, $remaining);
+            fwrite($output, ':' . str_repeat(' ', $size - 2) . "\n");
+            $remaining -= $size;
+        }
+        if (ob_get_level() > 0) {
+            ob_flush();
+        }
+        flush();
+    }
+
     // ─────────────────────────────────────────────────────────────
     //  Text Stream Protocol
     // ─────────────────────────────────────────────────────────────
@@ -190,6 +223,7 @@ class StreamTextResult
 
         if ($useStdout) {
             $output = fopen('php://output', 'w');
+            stream_set_write_buffer($output, 0);
         }
 
         if ($format === 'sse') {
@@ -198,6 +232,9 @@ class StreamTextResult
                 'Cache-Control' => 'no-cache',
                 'Connection' => 'keep-alive',
             ]);
+            if ($useStdout) {
+                $this->sendSSEPadding($output);
+            }
         } else {
             $this->sendStreamingHeaders([
                 'Content-Type' => 'text/plain; charset=utf-8',
@@ -254,6 +291,7 @@ class StreamTextResult
 
         if ($useStdout) {
             $output = fopen('php://output', 'w');
+            stream_set_write_buffer($output, 0);
         }
 
         $this->sendStreamingHeaders([
@@ -312,6 +350,7 @@ class StreamTextResult
 
         if ($useStdout) {
             $output = fopen('php://output', 'w');
+            stream_set_write_buffer($output, 0);
         }
 
         $this->sendStreamingHeaders([
@@ -320,6 +359,12 @@ class StreamTextResult
             'Connection' => 'keep-alive',
             'x-vercel-ai-ui-message-stream' => 'v1',
         ]);
+
+        // Send SSE padding to prime the nginx/fastcgi buffer so
+        // subsequent events flow through to the client immediately.
+        if ($useStdout) {
+            $this->sendSSEPadding($output);
+        }
 
         $messageMetadata = $options['messageMetadata'] ?? null;
         $sendReasoning = $options['sendReasoning'] ?? false;
