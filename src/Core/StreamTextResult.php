@@ -117,8 +117,10 @@ class StreamTextResult
      *
      * Disables output buffering and compression, clears any existing
      * output buffer levels (e.g. from WordPress or other frameworks).
+     *
+     * @param bool $clearBuffers Whether to clear output buffers (skip when writing to a file resource).
      */
-    private function prepareStreamingEnvironment(): void
+    private function prepareStreamingEnvironment(bool $clearBuffers = true): void
     {
         @ini_set('output_buffering', 'Off');
         @ini_set('zlib.output_compression', false);
@@ -127,10 +129,12 @@ class StreamTextResult
             @apache_setenv('no-gzip', '1');
         }
 
-        // Clear all output buffers that may have been opened by
-        // WordPress, PHP, or any other framework/middleware.
-        while (ob_get_level() > 0) {
-            ob_end_flush();
+        if ($clearBuffers) {
+            // Clear all output buffers that may have been opened by
+            // WordPress, PHP, or any other framework/middleware.
+            while (ob_get_level() > 0) {
+                ob_end_flush();
+            }
         }
     }
 
@@ -173,9 +177,10 @@ class StreamTextResult
      */
     public function pipeTextStreamToResponse($output = null, string $format = 'text'): void
     {
-        $this->prepareStreamingEnvironment();
+        $useStdout = ($output === null);
+        $this->prepareStreamingEnvironment(clearBuffers: $useStdout);
 
-        if ($output === null) {
+        if ($useStdout) {
             $output = fopen('php://output', 'w');
         }
 
@@ -230,9 +235,10 @@ class StreamTextResult
      */
     public function toTextStreamResponse($output = null): void
     {
-        $this->prepareStreamingEnvironment();
+        $useStdout = ($output === null);
+        $this->prepareStreamingEnvironment(clearBuffers: $useStdout);
 
-        if ($output === null) {
+        if ($useStdout) {
             $output = fopen('php://output', 'w');
         }
 
@@ -284,9 +290,10 @@ class StreamTextResult
      */
     public function toUIMessageStreamResponse(array $options = [], $output = null): void
     {
-        $this->prepareStreamingEnvironment();
+        $useStdout = ($output === null);
+        $this->prepareStreamingEnvironment(clearBuffers: $useStdout);
 
-        if ($output === null) {
+        if ($useStdout) {
             $output = fopen('php://output', 'w');
         }
 
@@ -479,8 +486,8 @@ class StreamTextResult
                             $usage = $chunk['totalUsage'];
                             if ($usage instanceof LanguageModelUsage) {
                                 $finishPart['totalUsage'] = [
-                                    'promptTokens' => $usage->promptTokens,
-                                    'completionTokens' => $usage->completionTokens,
+                                    'inputTokens' => $usage->inputTokens,
+                                    'outputTokens' => $usage->outputTokens,
                                     'totalTokens' => $usage->total(),
                                 ];
                             }
