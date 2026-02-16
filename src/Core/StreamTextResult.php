@@ -124,6 +124,7 @@ class StreamTextResult
     {
         @ini_set('output_buffering', 'Off');
         @ini_set('zlib.output_compression', false);
+        @ini_set('implicit_flush', '1');
 
         if (function_exists('apache_setenv')) {
             @apache_setenv('no-gzip', '1');
@@ -166,36 +167,33 @@ class StreamTextResult
     }
 
     /**
-     * Send SSE padding to prime the nginx/fastcgi buffer.
+     * Write output to the stream — uses echo for stdout, fwrite for files.
      *
-     * Nginx's fastcgi_buffer_size (often 4-64KB) prevents small SSE events
-     * from reaching the client until the buffer fills. By sending a
-     * block of SSE comments (which are ignored by clients), we fill the
-     * initial buffer so subsequent events flow through immediately.
+     * Using echo (instead of fwrite to php://output) ensures output goes
+     * through PHP's native output system, which works properly with
+     * ob_implicit_flush() and the SAPI flush mechanism.
      *
-     * This is a workaround for environments where nginx config can't be
-     * modified. The recommended solution is adding `fastcgi_buffering off;`
-     * to the nginx `location ~ \.php$` block.
-     *
-     * @param resource $output The output stream.
-     * @param int $bytes Number of padding bytes (default 64KB — matches common fastcgi_buffer_size).
+     * @param resource|null $output The output stream, or null for stdout.
+     * @param string $text The text to write.
      */
-    private function sendSSEPadding($output, int $bytes = 65536): void
+    private function writeOutput($output, string $text): void
     {
-        // SSE comment lines (starting with ':') are ignored by all clients
-        // including EventSource and @ai-sdk/react's fetch-based parser.
-        // Send in 4KB chunks to ensure each fwrite flushes through.
-        $chunkSize = 4096;
-        $remaining = $bytes;
-        while ($remaining > 0) {
-            $size = min($chunkSize, $remaining);
-            fwrite($output, ':' . str_repeat(' ', $size - 2) . "\n");
-            $remaining -= $size;
+        if ($output === null) {
+            echo $text;
+        } else {
+            fwrite($output, $text);
         }
+    }
+
+    /**
+     * Flush all output buffers and the SAPI layer.
+     */
+    private function flushOutput(): void
+    {
         if (ob_get_level() > 0) {
-            ob_flush();
+            @ob_flush();
         }
-        flush();
+        @flush();
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -221,20 +219,12 @@ class StreamTextResult
         $useStdout = ($output === null);
         $this->prepareStreamingEnvironment(clearBuffers: $useStdout);
 
-        if ($useStdout) {
-            $output = fopen('php://output', 'w');
-            stream_set_write_buffer($output, 0);
-        }
-
         if ($format === 'sse') {
             $this->sendStreamingHeaders([
                 'Content-Type' => 'text/event-stream',
                 'Cache-Control' => 'no-cache',
                 'Connection' => 'keep-alive',
             ]);
-            if ($useStdout) {
-                $this->sendSSEPadding($output);
-            }
         } else {
             $this->sendStreamingHeaders([
                 'Content-Type' => 'text/plain; charset=utf-8',
@@ -244,22 +234,16 @@ class StreamTextResult
 
         foreach ($this->getTextStream() as $textDelta) {
             if ($format === 'sse') {
-                fwrite($output, "data: " . json_encode($textDelta) . "\n\n");
+                $this->writeOutput($output, "data: " . json_encode($textDelta) . "\n\n");
             } else {
-                fwrite($output, $textDelta);
+                $this->writeOutput($output, $textDelta);
             }
-            if (ob_get_level() > 0) {
-                ob_flush();
-            }
-            flush();
+            $this->flushOutput();
         }
 
         if ($format === 'sse') {
-            fwrite($output, "data: [DONE]\n\n");
-            if (ob_get_level() > 0) {
-                ob_flush();
-            }
-            flush();
+            $this->writeOutput($output, "data: [DONE]\n\n");
+            $this->flushOutput();
         }
     }
 
@@ -289,21 +273,13 @@ class StreamTextResult
         $useStdout = ($output === null);
         $this->prepareStreamingEnvironment(clearBuffers: $useStdout);
 
-        if ($useStdout) {
-            $output = fopen('php://output', 'w');
-            stream_set_write_buffer($output, 0);
-        }
-
         $this->sendStreamingHeaders([
             'Content-Type' => 'text/plain; charset=utf-8',
         ]);
 
         foreach ($this->getTextStream() as $textDelta) {
-            fwrite($output, $textDelta);
-            if (ob_get_level() > 0) {
-                ob_flush();
-            }
-            flush();
+            $this->writeOutput($output, $textDelta);
+            $this->flushOutput();
         }
     }
 
@@ -348,23 +324,12 @@ class StreamTextResult
         $useStdout = ($output === null);
         $this->prepareStreamingEnvironment(clearBuffers: $useStdout);
 
-        if ($useStdout) {
-            $output = fopen('php://output', 'w');
-            stream_set_write_buffer($output, 0);
-        }
-
         $this->sendStreamingHeaders([
             'Content-Type' => 'text/event-stream',
             'Cache-Control' => 'no-cache',
             'Connection' => 'keep-alive',
             'x-vercel-ai-ui-message-stream' => 'v1',
         ]);
-
-        // Send SSE padding to prime the nginx/fastcgi buffer so
-        // subsequent events flow through to the client immediately.
-        if ($useStdout) {
-            $this->sendSSEPadding($output);
-        }
 
         $messageMetadata = $options['messageMetadata'] ?? null;
         $sendReasoning = $options['sendReasoning'] ?? false;
@@ -614,29 +579,23 @@ class StreamTextResult
         }
 
         // Terminate the stream
-        fwrite($output, "data: [DONE]\n\n");
-        if (ob_get_level() > 0) {
-            ob_flush();
-        }
-        flush();
+        $this->writeOutput($output, "data: [DONE]\n\n");
+        $this->flushOutput();
     }
 
     /**
      * Write a single SSE event to the output stream.
      *
-     * @param resource $output
-     * @param array $data
+     * Uses echo for stdout (null) which integrates with PHP's SAPI flush,
+     * or fwrite for file resources (used in tests).
+     *
+     * @param resource|null $output The output stream, or null for stdout.
+     * @param array $data The event data to JSON-encode and send.
      */
     private function writeSSE($output, array $data): void
     {
-        fwrite($output, "data: " . json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n\n");
-        // ob_flush() pushes data from PHP's output buffer to the SAPI layer;
-        // flush() pushes it from the SAPI layer to the web server.
-        // Both are needed when ob_implicit_flush is not active (e.g. tests).
-        if (ob_get_level() > 0) {
-            ob_flush();
-        }
-        flush();
+        $this->writeOutput($output, "data: " . json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n\n");
+        $this->flushOutput();
     }
 
     // ─────────────────────────────────────────────────────────────
