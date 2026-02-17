@@ -122,8 +122,7 @@ class StreamTextResult
      */
     private function prepareStreamingEnvironment(bool $clearBuffers = true): void
     {
-        @ini_set('output_buffering', 'Off');
-        @ini_set('zlib.output_compression', false);
+        @ini_set('zlib.output_compression', '0');
         @ini_set('implicit_flush', '1');
 
         if (function_exists('apache_setenv')) {
@@ -162,8 +161,6 @@ class StreamTextResult
 
         // Disable nginx/proxy buffering
         header('X-Accel-Buffering: no');
-        // Prevent gzip/brotli compression which buffers multiple chunks
-        header('Content-Encoding: none');
     }
 
     /**
@@ -190,9 +187,7 @@ class StreamTextResult
      */
     private function flushOutput(): void
     {
-        if (ob_get_level() > 0) {
-            @ob_flush();
-        }
+        @ob_flush();
         @flush();
     }
 
