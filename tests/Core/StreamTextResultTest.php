@@ -115,11 +115,19 @@ class StreamTextResultTest extends TestCase
         $this->assertContains('finish-step', $types);
         $this->assertContains('finish', $types);
 
-        // Finish event should contain usage
+        // Finish event should carry usage under `messageMetadata.totalUsage`
+        // (NOT a top-level `totalUsage` key). The AI SDK v6 UI message chunk
+        // schema is `z.strictObject({type:'finish', finishReason?, messageMetadata?})`
+        // and unknown top-level keys cause the browser-side parse to fail —
+        // which surfaces as a phantom error on the happy path in `useChat()`.
         $finishEvents = array_filter($events, fn($e) => $e['type'] === 'finish');
         $finishEvent = array_values($finishEvents)[0];
-        $this->assertArrayHasKey('totalUsage', $finishEvent);
-        $this->assertSame(10, $finishEvent['totalUsage']['inputTokens']);
+        $this->assertArrayNotHasKey('totalUsage', $finishEvent);
+        $this->assertArrayHasKey('messageMetadata', $finishEvent);
+        $this->assertArrayHasKey('totalUsage', $finishEvent['messageMetadata']);
+        $this->assertSame(10, $finishEvent['messageMetadata']['totalUsage']['inputTokens']);
+        $this->assertSame(5, $finishEvent['messageMetadata']['totalUsage']['outputTokens']);
+        $this->assertSame(15, $finishEvent['messageMetadata']['totalUsage']['totalTokens']);
 
         // Should end with [DONE]
         $this->assertStringEndsWith("data: [DONE]\n\n", $output);
@@ -305,7 +313,14 @@ class StreamTextResultTest extends TestCase
                         return ['model' => 'gpt-4.1'];
                     }
                     if ($part['type'] === 'finish') {
-                        return ['totalTokens' => $part['totalUsage']['totalTokens'] ?? 0];
+                        // The auto-populated `totalUsage` block is already
+                        // attached to `messageMetadata` by the time the callback
+                        // runs, so callers read it from there (not from a
+                        // top-level `totalUsage` key, which no longer exists —
+                        // see the AI SDK v6 schema-compatibility fix).
+                        return [
+                            'totalTokens' => $part['messageMetadata']['totalUsage']['totalTokens'] ?? 0,
+                        ];
                     }
                     return null;
                 },
@@ -319,15 +334,23 @@ class StreamTextResultTest extends TestCase
 
         $events = $this->parseSSEEvents($output);
 
-        // Start event should have metadata
+        // Start event should have messageMetadata (key matches AI SDK v6 schema)
         $this->assertSame('start', $events[0]['type']);
-        $this->assertSame(['model' => 'gpt-4.1'], $events[0]['metadata']);
+        $this->assertSame(['model' => 'gpt-4.1'], $events[0]['messageMetadata']);
+        $this->assertArrayNotHasKey('metadata', $events[0]);
 
-        // Finish event should have metadata
+        // Finish event should have messageMetadata containing BOTH the
+        // auto-populated `totalUsage` block and the callback-supplied keys.
+        // Caller-supplied keys win on key conflict.
         $finishEvents = array_filter($events, fn($e) => $e['type'] === 'finish');
         $finishEvent = array_values($finishEvents)[0];
-        $this->assertArrayHasKey('metadata', $finishEvent);
-        $this->assertSame(15, $finishEvent['metadata']['totalTokens']);
+        $this->assertArrayNotHasKey('metadata', $finishEvent);
+        $this->assertArrayHasKey('messageMetadata', $finishEvent);
+        // Caller's key:
+        $this->assertSame(15, $finishEvent['messageMetadata']['totalTokens']);
+        // Auto-populated `totalUsage` survives the merge:
+        $this->assertArrayHasKey('totalUsage', $finishEvent['messageMetadata']);
+        $this->assertSame(10, $finishEvent['messageMetadata']['totalUsage']['inputTokens']);
     }
 
     public function testToUIMessageStreamResponseWithError(): void
@@ -459,6 +482,106 @@ class StreamTextResultTest extends TestCase
         $this->assertNotNull($captured);
         $this->assertSame('Hi', $captured['text']);
         $this->assertInstanceOf(LanguageModelUsage::class, $captured['usage']);
+    }
+
+    // ─── AI SDK v6 strict-schema invariant ───
+
+    /**
+     * Contract test: every chunk emitted by `toUIMessageStreamResponse()`
+     * must carry **only** keys that the AI SDK v6 UI message chunk schema
+     * recognises for its `type`.
+     *
+     * The schema is `z.strictObject(...)` per variant — unknown keys cause
+     * the browser-side parse in `DefaultChatTransport.processResponseStream`
+     * to throw, which `AbstractChat.makeRequest` stores as `state.error` and
+     * `useChat()` surfaces. That's how a phantom "Chat is temporarily
+     * unavailable" banner can fire on a successful response if any chunk
+     * here ever grows an extra top-level field.
+     *
+     * The fixture exercises the dense path (text + tool call + finish with
+     * usage); extend the allow-list and the fixture together if new chunk
+     * types are added.
+     */
+    public function testToUIMessageStreamResponseChunksMatchAiSdkV6StrictSchema(): void
+    {
+        $allowedKeysByType = [
+            'start'                 => ['type', 'messageId', 'messageMetadata'],
+            'start-step'            => ['type'],
+            'finish-step'           => ['type'],
+            'finish'                => ['type', 'finishReason', 'messageMetadata'],
+            'text-start'            => ['type', 'id', 'providerMetadata'],
+            'text-delta'            => ['type', 'id', 'delta', 'providerMetadata'],
+            'text-end'              => ['type', 'id', 'providerMetadata'],
+            'reasoning-start'       => ['type', 'id', 'providerMetadata'],
+            'reasoning-delta'       => ['type', 'id', 'delta', 'providerMetadata'],
+            'reasoning-end'         => ['type', 'id', 'providerMetadata'],
+            'tool-input-start'      => ['type', 'toolCallId', 'toolName', 'providerExecuted', 'providerMetadata', 'dynamic', 'title'],
+            'tool-input-delta'      => ['type', 'toolCallId', 'inputTextDelta'],
+            'tool-input-available'  => ['type', 'toolCallId', 'toolName', 'input', 'providerExecuted', 'providerMetadata', 'dynamic', 'title'],
+            'tool-output-available' => ['type', 'toolCallId', 'output', 'providerExecuted', 'dynamic', 'preliminary'],
+            'error'                 => ['type', 'errorText'],
+        ];
+
+        $result = $this->createStreamResult([
+            ['type' => 'text-delta', 'textDelta' => 'Looking it up.'],
+            [
+                'type' => 'tool-call',
+                'toolCallId' => 'call_strict',
+                'toolName' => 'getWeather',
+                'args' => ['city' => 'BD'],
+                'step' => 0,
+            ],
+            [
+                'type' => 'tool-result',
+                'toolCallId' => 'call_strict',
+                'result' => ['temp' => 30],
+                'step' => 0,
+            ],
+            ['type' => 'step-finish', 'step' => 0, 'finishReason' => 'tool-calls'],
+            ['type' => 'finish', 'totalUsage' => new LanguageModelUsage(42, 17)],
+        ]);
+
+        $outputFile = tmpfile();
+        $result->toUIMessageStreamResponse(output: $outputFile);
+
+        fseek($outputFile, 0);
+        $output = stream_get_contents($outputFile);
+        fclose($outputFile);
+
+        $events = $this->parseSSEEvents($output);
+        $this->assertNotEmpty($events);
+
+        foreach ($events as $i => $event) {
+            $type = $event['type'] ?? null;
+            $this->assertNotNull($type, "Event #{$i} has no `type` key: " . json_encode($event));
+            $this->assertArrayHasKey(
+                $type,
+                $allowedKeysByType,
+                "Event #{$i} type `{$type}` is not in the allow-list. Update the test or the emitter."
+            );
+
+            $extra = array_diff(array_keys($event), $allowedKeysByType[$type]);
+            $this->assertSame(
+                [],
+                $extra,
+                "Event #{$i} of type `{$type}` has unrecognised top-level key(s): "
+                . implode(', ', $extra)
+                . ' — these will be rejected by `@ai-sdk/react`\'s strict zod parse.'
+            );
+        }
+
+        // Regression guard for the specific bug this test was added to catch:
+        // the `finish` chunk used to carry a top-level `totalUsage`.
+        $finishEvents = array_values(array_filter(
+            $events,
+            fn($e) => ($e['type'] ?? '') === 'finish'
+        ));
+        $this->assertCount(1, $finishEvents);
+        $this->assertArrayNotHasKey('totalUsage', $finishEvents[0]);
+        $this->assertSame(
+            42,
+            $finishEvents[0]['messageMetadata']['totalUsage']['inputTokens'] ?? null
+        );
     }
 
     // ─── Helpers ───

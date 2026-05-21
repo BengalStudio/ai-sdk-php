@@ -348,7 +348,12 @@ class StreamTextResult
                     if ($messageMetadata) {
                         $meta = $messageMetadata($startPart);
                         if ($meta !== null) {
-                            $startPart['metadata'] = $meta;
+                            // The AI SDK v6 UI message chunk schema (`uiMessageChunkSchema`,
+                            // `z.strictObject({...messageMetadata?: z.unknown()})`) names this
+                            // key `messageMetadata`, not `metadata` — strict zod parsing on
+                            // the client rejects the chunk otherwise and `useChat()` flips
+                            // to an error state on the happy path.
+                            $startPart['messageMetadata'] = $meta;
                         }
                     }
                     $this->writeSSE($output, $startPart);
@@ -512,7 +517,15 @@ class StreamTextResult
                             if ($messageMetadata) {
                                 $meta = $messageMetadata($finishStepPart);
                                 if ($meta !== null) {
-                                    $finishStepPart['metadata'] = $meta;
+                                    // Rename `metadata` → `messageMetadata` for parity
+                                    // with the AI SDK v6 schema. Note: the current
+                                    // `finish-step` chunk schema is the empty strict
+                                    // object `{type: 'finish-step'}` — attaching any
+                                    // metadata here will still be rejected by clients
+                                    // running zod-strict validation. Future schema
+                                    // versions are likely to widen this, and this
+                                    // rename keeps the key compatible if they do.
+                                    $finishStepPart['messageMetadata'] = $meta;
                                 }
                             }
                             $this->writeSSE($output, $finishStepPart);
@@ -537,20 +550,34 @@ class StreamTextResult
                         }
 
                         $finishPart = ['type' => 'finish'];
-                        if (isset($chunk['totalUsage'])) {
+                        // `totalUsage` is not a recognised top-level key on the
+                        // AI SDK v6 `finish` chunk (`uiMessageChunkSchema` accepts
+                        // only `{type, finishReason?, messageMetadata?}` and uses
+                        // `z.strictObject`). Carry the usage numbers inside the
+                        // unstructured `messageMetadata` payload instead so they
+                        // survive strict zod validation in `@ai-sdk/react`'s
+                        // `DefaultChatTransport.processResponseStream` and don't
+                        // flip the client into a phantom error state.
+                        if (isset($chunk['totalUsage']) && $chunk['totalUsage'] instanceof LanguageModelUsage) {
                             $usage = $chunk['totalUsage'];
-                            if ($usage instanceof LanguageModelUsage) {
-                                $finishPart['totalUsage'] = [
+                            $finishPart['messageMetadata'] = [
+                                'totalUsage' => [
                                     'inputTokens' => $usage->inputTokens,
                                     'outputTokens' => $usage->outputTokens,
                                     'totalTokens' => $usage->total(),
-                                ];
-                            }
+                                ],
+                            ];
                         }
                         if ($messageMetadata) {
                             $meta = $messageMetadata($finishPart);
-                            if ($meta !== null) {
-                                $finishPart['metadata'] = $meta;
+                            if (is_array($meta)) {
+                                // Deep-merge so caller-supplied metadata and the
+                                // auto-populated `totalUsage` block coexist under
+                                // `messageMetadata`. Caller keys win on conflict.
+                                $finishPart['messageMetadata'] = array_merge(
+                                    $finishPart['messageMetadata'] ?? [],
+                                    $meta
+                                );
                             }
                         }
                         $this->writeSSE($output, $finishPart);
