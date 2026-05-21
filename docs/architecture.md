@@ -1,6 +1,6 @@
 # Architecture
 
-An overview of the `bengal-studio/ai-sdk-php` package architecture, modeled after [Vercel's AI SDK](https://github.com/vercel/ai).
+An overview of the `bengal-studio/ai-sdk` package architecture, modeled after [Vercel's AI SDK](https://github.com/vercel/ai).
 
 ## Design Principles
 
@@ -50,7 +50,7 @@ src/
                    │
 ┌──────────────────▼───────────────────────────┐
 │         Provider Implementations             │
-│   ai-sdk-php/openai   (future: anthropic…)   │
+│  bengal-studio/ai-sdk-openai  (future: …)    │
 └──────────────────────────────────────────────┘
 ```
 

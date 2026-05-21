@@ -27,3 +27,7 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+# Internal planning & review docs
+/*_PLAN.md
+/*REVIEW.md

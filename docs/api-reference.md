@@ -1,6 +1,6 @@
 # API Reference
 
-Complete API reference for the `bengal-studio/ai-sdk-php` package.
+Complete API reference for the `bengal-studio/ai-sdk` package.
 
 ## Table of Contents
 

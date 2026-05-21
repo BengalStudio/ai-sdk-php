@@ -10,7 +10,7 @@ A PHP port of [Vercel's AI SDK](https://github.com/vercel/ai) — a unified inte
 ## Installation
 
 ```bash
-composer require bengal-studio/ai-sdk-php
+composer require bengal-studio/ai-sdk
 ```
 
 ## Quick Start

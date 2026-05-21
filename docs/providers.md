@@ -283,7 +283,7 @@ throw new APICallException(
     "name": "my-vendor/ai-sdk-my-provider",
     "require": {
         "php": "^8.1",
-        "bengal-studio/ai-sdk-php": "^1.0",
+        "bengal-studio/ai-sdk": "^1.0",
         "guzzlehttp/guzzle": "^7.0"
     },
     "autoload": {
@@ -312,4 +312,4 @@ public function testImplementsLanguageModel(): void
 }
 ```
 
-See the [ai-sdk-php/openai](https://github.com/bengal-studio/ai-sdk-php-openai) package for a complete reference implementation.
+See the [bengal-studio/ai-sdk-openai](https://github.com/bengal-studio/ai-sdk-openai) package for a complete reference implementation.
