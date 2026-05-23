@@ -84,6 +84,10 @@ foreach ($result->getTextStream() as $delta) {
 $result->pipeTextStreamToResponse(format: 'sse');
 ```
 
+To smooth jittery provider deltas into evenly-paced words or lines, pass
+`smoothStream()` via `experimental_transform` — see
+[docs/streaming.md](docs/streaming.md#smoothing-streamed-output).
+
 #### Streaming with `@ai-sdk/react`
 
 The SDK supports both stream protocols used by the Vercel AI SDK React hooks.

@@ -14,6 +14,7 @@ use BengalStudio\AI\Core\GenerateObject;
 use BengalStudio\AI\Core\GenerateObjectResult;
 use BengalStudio\AI\Core\GenerateText;
 use BengalStudio\AI\Core\GenerateTextResult;
+use BengalStudio\AI\Core\SmoothStream;
 use BengalStudio\AI\Core\StreamObject;
 use BengalStudio\AI\Core\StreamObjectResult;
 use BengalStudio\AI\Core\StreamText;
@@ -104,8 +105,39 @@ function streamText(array $options): StreamTextResult
     if (isset($options['onFinish'])) $stream->onFinish($options['onFinish']);
     if (isset($options['onChunk'])) $stream->onChunk($options['onChunk']);
     if (isset($options['onStepFinish'])) $stream->onStepFinish($options['onStepFinish']);
+    if (isset($options['experimental_transform'])) $stream->transform($options['experimental_transform']);
 
     return $stream->execute();
+}
+
+/**
+ * Build a transform that smooths text and reasoning streaming output.
+ *
+ * Returns a generator-to-generator closure suitable for passing to
+ * `streamText()`'s `experimental_transform` option (or `StreamText::transform()`).
+ *
+ * @param array{
+ *   delayInMs?: int|null,
+ *   chunking?: 'word'|'line'|string|callable|\IntlBreakIterator,
+ *   _internal?: array{ delay?: callable }
+ * } $options
+ *
+ * @return \Closure(\Generator): \Generator
+ *
+ * @example
+ * ```php
+ * use function BengalStudio\AI\{smoothStream, streamText};
+ *
+ * $result = streamText([
+ *     'model'                  => $model,
+ *     'prompt'                 => '...',
+ *     'experimental_transform' => smoothStream(['delayInMs' => 20, 'chunking' => 'word']),
+ * ]);
+ * ```
+ */
+function smoothStream(array $options = []): \Closure
+{
+    return SmoothStream::create($options);
 }
 
 /**

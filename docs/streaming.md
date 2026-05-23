@@ -106,6 +106,76 @@ foreach ($result->getFullStream() as $event) {
 }
 ```
 
+## Smoothing streamed output
+
+Provider deltas often arrive in irregular chunks — sometimes a full sentence at
+once, sometimes a single character — which looks jittery in the UI. The
+`smoothStream` transform buffers incoming `text-delta` (and `reasoning`) chunks
+and re-emits them in evenly-paced pieces (word, line, regex, callable, or
+locale-aware), with an optional inter-chunk delay.
+
+```php
+use function BengalStudio\AI\{smoothStream, streamText};
+
+$result = streamText([
+    'model'                  => $model,
+    'prompt'                 => 'Write a poem about PHP.',
+    'experimental_transform' => smoothStream([
+        'delayInMs' => 20,
+        'chunking'  => 'word',
+    ]),
+]);
+
+foreach ($result->getTextStream() as $delta) {
+    echo $delta;
+    flush();
+}
+```
+
+Other chunk types (tool calls, tool results, step-finish, finish) pass through
+unchanged. The buffer is always flushed before a non-smoothable chunk and at
+end of stream, so no partial text is ever dropped.
+
+### Options
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `delayInMs` | `int\|null` | `10` | Sleep between emitted chunks. `null` or `0` disables the sleep. |
+| `chunking` | `'word'\|'line'\|string\|callable\|\IntlBreakIterator` | `'word'` | How to split buffered text. |
+
+`chunking` accepts:
+
+- **`'word'`** — splits at whitespace boundaries (`/\S+\s+/m`).
+- **`'line'`** — splits at one-or-more newlines (`/\n+/m`).
+- **A PCRE pattern string** — e.g. `'/[^_]*_/'` to chunk on underscore-terminated segments.
+- **A callable** `fn(string $buffer): ?string` that returns the next prefix to emit, or `null` if not ready. Must return a non-empty prefix of the buffer.
+- **An `\IntlBreakIterator`** (requires `ext-intl`) — recommended for CJK languages where whitespace boundaries are unreliable.
+
+### Custom chunking
+
+```php
+$result = streamText([
+    'model'  => $model,
+    'prompt' => '...',
+    'experimental_transform' => smoothStream([
+        'chunking' => fn(string $buf) =>
+            preg_match('/.+?[\.\?!]\s/', $buf, $m) ? $m[0] : null,
+    ]),
+]);
+```
+
+### Locale-aware (CJK)
+
+```php
+$result = streamText([
+    'model'  => $model,
+    'prompt' => '日本語で書いてください。',
+    'experimental_transform' => smoothStream([
+        'chunking' => \IntlBreakIterator::createWordInstance('ja'),
+    ]),
+]);
+```
+
 ## Streaming Options
 
 `streamText` accepts all the same options as `generateText`:
@@ -121,6 +191,7 @@ foreach ($result->getFullStream() as $event) {
 | `maxOutputTokens` | `int` | Token limit |
 | `onChunk` | `callable` | Called for each chunk |
 | `onFinish` | `callable` | Called when done |
+| `experimental_transform` | `\Closure\|array` | Stream transform(s) — see [`smoothStream`](#smoothing-streamed-output) |
 
 ## Stream Events Reference
 

@@ -41,6 +41,8 @@ class StreamText
     private ?\Closure $onFinish = null;
     private ?\Closure $onChunk = null;
     private ?\Closure $onStepFinish = null;
+    /** @var array<int, callable> */
+    private array $transforms = [];
 
     public function __construct(LanguageModel $model)
     {
@@ -168,6 +170,27 @@ class StreamText
     }
 
     /**
+     * Register one or more stream transforms applied in order to the full
+     * stream produced by execute(). Each transform is a generator-to-generator
+     * wrapper: callable(\Generator): \Generator.
+     *
+     * @param callable|array<int, callable> $transform
+     */
+    public function transform(callable|array $transform): self
+    {
+        $transforms = is_array($transform) ? $transform : [$transform];
+        foreach ($transforms as $t) {
+            if (!is_callable($t)) {
+                throw new \InvalidArgumentException(
+                    'Each transform must be callable(\\Generator): \\Generator.'
+                );
+            }
+        }
+        $this->transforms = array_merge($this->transforms, $transforms);
+        return $this;
+    }
+
+    /**
      * Execute the streaming text generation.
      */
     public function execute(): StreamTextResult
@@ -180,13 +203,25 @@ class StreamText
 
         $validatedSettings = CallSettings::prepare($this->settings);
         $prepared = ToolPreparer::prepare($this->tools, $this->toolChoice);
+        $transforms = $this->transforms;
 
         return new StreamTextResult(
-            streamFactory: fn() => $this->createStream(
+            streamFactory: function () use (
                 $promptMessages,
                 $validatedSettings,
-                $prepared
-            ),
+                $prepared,
+                $transforms,
+            ) {
+                $stream = $this->createStream(
+                    $promptMessages,
+                    $validatedSettings,
+                    $prepared
+                );
+                foreach ($transforms as $t) {
+                    $stream = $t($stream);
+                }
+                return $stream;
+            },
             onFinish: $this->onFinish,
         );
     }
