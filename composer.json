@@ -2,7 +2,7 @@
     "name": "bengal-studio/ai-sdk",
     "description": "AI SDK for PHP - A provider-agnostic toolkit for building AI-powered applications, inspired by Vercel's AI SDK.",
     "type": "library",
-    "license": "Apache-2.0",
+    "license": "GPL-2.0-or-later",
     "keywords": [
         "ai",
         "sdk",

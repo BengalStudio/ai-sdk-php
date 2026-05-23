@@ -536,4 +536,4 @@ src/
 
 ## License
 
-MIT
+Licensed under the [GNU General Public License v2.0 or later](./LICENSE.md).
