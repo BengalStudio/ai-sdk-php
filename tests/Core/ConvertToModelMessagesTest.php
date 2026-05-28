@@ -70,8 +70,10 @@ class ConvertToModelMessagesTest extends TestCase
         $this->assertSame('You are a helpful assistant.', $messages[0]->content);
     }
 
-    public function testConvertsAssistantWithToolInvocation(): void
+    public function testConvertsAssistantWithToolCall(): void
     {
+        // AI SDK v5+ static tool part: type `tool-<name>`, state
+        // `output-available`, name encoded in the type suffix (no toolName field).
         $uiMessages = [
             [
                 'id' => 'msg_1',
@@ -86,10 +88,9 @@ class ConvertToModelMessagesTest extends TestCase
                 'parts' => [
                     ['type' => 'text', 'text' => 'Let me check the weather.'],
                     [
-                        'type' => 'tool-invocation',
-                        'toolInvocationId' => 'call_abc123',
-                        'toolName' => 'getWeather',
-                        'state' => 'result',
+                        'type' => 'tool-getWeather',
+                        'toolCallId' => 'call_abc123',
+                        'state' => 'output-available',
                         'input' => ['city' => 'San Francisco'],
                         'output' => ['temp' => 72, 'condition' => 'sunny'],
                     ],
@@ -115,6 +116,7 @@ class ConvertToModelMessagesTest extends TestCase
         $this->assertSame('tool-call', $messages[1]->content[1]['type']);
         $this->assertSame('call_abc123', $messages[1]->content[1]['toolCallId']);
         $this->assertSame('getWeather', $messages[1]->content[1]['toolName']);
+        $this->assertSame(['city' => 'San Francisco'], $messages[1]->content[1]['input']);
 
         // Tool result message
         $this->assertSame('tool', $messages[2]->role);
@@ -122,6 +124,116 @@ class ConvertToModelMessagesTest extends TestCase
         $this->assertCount(1, $messages[2]->content);
         $this->assertSame('tool-result', $messages[2]->content[0]['type']);
         $this->assertSame('call_abc123', $messages[2]->content[0]['toolCallId']);
+        $this->assertSame('getWeather', $messages[2]->content[0]['toolName']);
+        // Non-string output is JSON-encoded into `result` (the key the OpenAI
+        // converter reads via `output ?? result`).
+        $this->assertSame('{"temp":72,"condition":"sunny"}', $messages[2]->content[0]['result']);
+    }
+
+    public function testConvertsToolOutputError(): void
+    {
+        // output-error: input may be absent — fall back to rawInput — and the
+        // errorText becomes the tool result so OpenAI still gets a matching
+        // tool message for the tool_call_id.
+        $uiMessages = [
+            [
+                'id' => 'msg_1',
+                'role' => 'assistant',
+                'parts' => [
+                    [
+                        'type' => 'tool-getWeather',
+                        'toolCallId' => 'call_err',
+                        'state' => 'output-error',
+                        'errorText' => 'Service unavailable',
+                        'rawInput' => ['city' => 'SF'],
+                    ],
+                ],
+            ],
+        ];
+
+        $messages = convertToModelMessages($uiMessages);
+
+        $this->assertCount(2, $messages);
+        $this->assertSame('assistant', $messages[0]->role);
+        $this->assertSame('tool-call', $messages[0]->content[0]['type']);
+        $this->assertSame('call_err', $messages[0]->content[0]['toolCallId']);
+        $this->assertSame(['city' => 'SF'], $messages[0]->content[0]['input']);
+
+        $this->assertSame('tool', $messages[1]->role);
+        $this->assertSame('tool-result', $messages[1]->content[0]['type']);
+        $this->assertSame('call_err', $messages[1]->content[0]['toolCallId']);
+        $this->assertSame('Service unavailable', $messages[1]->content[0]['result']);
+    }
+
+    public function testConvertsDynamicToolPart(): void
+    {
+        // dynamic-tool parts carry the tool name in an explicit field.
+        $uiMessages = [
+            [
+                'id' => 'msg_1',
+                'role' => 'assistant',
+                'parts' => [
+                    [
+                        'type' => 'dynamic-tool',
+                        'toolName' => 'search',
+                        'toolCallId' => 'call_dyn',
+                        'state' => 'output-available',
+                        'input' => ['q' => 'php'],
+                        'output' => 'results',
+                    ],
+                ],
+            ],
+        ];
+
+        $messages = convertToModelMessages($uiMessages);
+
+        $this->assertCount(2, $messages);
+        $this->assertSame('tool-call', $messages[0]->content[0]['type']);
+        $this->assertSame('search', $messages[0]->content[0]['toolName']);
+        $this->assertSame('tool', $messages[1]->role);
+        $this->assertSame('search', $messages[1]->content[0]['toolName']);
+        $this->assertSame('results', $messages[1]->content[0]['result']);
+    }
+
+    public function testConvertsMultiStepToolTurn(): void
+    {
+        // Two resolved tool steps in one assistant turn (step-start markers
+        // separate them). The minimal converter collapses them into one
+        // assistant message (both tool-calls) + one tool message (both
+        // results) — well-formed for OpenAI: every tool_call_id is answered.
+        $uiMessages = [
+            [
+                'id' => 'msg_1',
+                'role' => 'assistant',
+                'parts' => [
+                    ['type' => 'step-start'],
+                    ['type' => 'tool-alpha', 'toolCallId' => 'c1', 'state' => 'output-available', 'input' => [], 'output' => 'r1'],
+                    ['type' => 'step-start'],
+                    ['type' => 'tool-beta', 'toolCallId' => 'c2', 'state' => 'output-available', 'input' => [], 'output' => 'r2'],
+                    ['type' => 'text', 'text' => 'Done'],
+                ],
+            ],
+        ];
+
+        $messages = convertToModelMessages($uiMessages);
+
+        $this->assertCount(2, $messages);
+
+        // Assistant: two tool-calls + the final text.
+        $this->assertSame('assistant', $messages[0]->role);
+        $toolCalls = array_values(array_filter(
+            $messages[0]->content,
+            fn($c) => ($c['type'] ?? '') === 'tool-call',
+        ));
+        $this->assertCount(2, $toolCalls);
+        $this->assertSame('c1', $toolCalls[0]['toolCallId']);
+        $this->assertSame('c2', $toolCalls[1]['toolCallId']);
+
+        // Tool: both results, in order.
+        $this->assertSame('tool', $messages[1]->role);
+        $this->assertCount(2, $messages[1]->content);
+        $this->assertSame('c1', $messages[1]->content[0]['toolCallId']);
+        $this->assertSame('c2', $messages[1]->content[1]['toolCallId']);
     }
 
     public function testConvertsAssistantTextOnlyAsString(): void
@@ -188,8 +300,38 @@ class ConvertToModelMessagesTest extends TestCase
         $this->assertSame('image/png', $messages[0]->content[1]['mimeType']);
     }
 
-    public function testConvertsToolInvocationWithoutResult(): void
+    public function testSkipsIncompleteToolCall(): void
     {
+        // An unresolved tool call (state input-available/input-streaming) is
+        // skipped entirely: emitting an assistant tool-call with no matching
+        // tool message is a hard OpenAI 400. Persisted history never contains
+        // these (it is saved after the stream finishes), so this is defensive.
+        $uiMessages = [
+            [
+                'id' => 'msg_1',
+                'role' => 'assistant',
+                'parts' => [
+                    [
+                        'type' => 'tool-search',
+                        'toolCallId' => 'call_1',
+                        'state' => 'input-available',
+                        'input' => ['query' => 'php streaming'],
+                    ],
+                ],
+            ],
+        ];
+
+        $messages = convertToModelMessages($uiMessages);
+
+        // Nothing emitted: no orphaned tool-call, no tool message.
+        $this->assertCount(0, $messages);
+    }
+
+    public function testSkipsLegacyV4ToolInvocation(): void
+    {
+        // Legacy v4 parts (type 'tool-invocation', state 'result'/'call') are
+        // no longer produced by any client. They fall through the v6 state
+        // guard and are skipped rather than mishandled.
         $uiMessages = [
             [
                 'id' => 'msg_1',
@@ -199,8 +341,9 @@ class ConvertToModelMessagesTest extends TestCase
                         'type' => 'tool-invocation',
                         'toolInvocationId' => 'call_1',
                         'toolName' => 'search',
-                        'state' => 'call',
-                        'input' => ['query' => 'php streaming'],
+                        'state' => 'result',
+                        'input' => ['query' => 'x'],
+                        'output' => 'y',
                     ],
                 ],
             ],
@@ -208,11 +351,7 @@ class ConvertToModelMessagesTest extends TestCase
 
         $messages = convertToModelMessages($uiMessages);
 
-        // Only assistant message, no tool result
-        $this->assertCount(1, $messages);
-        $this->assertSame('assistant', $messages[0]->role);
-        $this->assertIsArray($messages[0]->content);
-        $this->assertSame('tool-call', $messages[0]->content[0]['type']);
+        $this->assertCount(0, $messages);
     }
 
     public function testSkipsEmptyMessages(): void
@@ -252,10 +391,9 @@ class ConvertToModelMessagesTest extends TestCase
                 'parts' => [
                     ['type' => 'text', 'text' => 'Checking...'],
                     [
-                        'type' => 'tool-invocation',
-                        'toolInvocationId' => 'call_1',
-                        'toolName' => 'weather',
-                        'state' => 'result',
+                        'type' => 'tool-weather',
+                        'toolCallId' => 'call_1',
+                        'state' => 'output-available',
                         'input' => ['city' => 'NYC'],
                         'output' => '72F sunny',
                     ],

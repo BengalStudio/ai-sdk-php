@@ -43,7 +43,7 @@ class UIMessageTest extends TestCase
             'role' => 'assistant',
             'parts' => [
                 ['type' => 'text', 'text' => 'Hello'],
-                ['type' => 'tool-invocation', 'toolInvocationId' => 'call_1', 'toolName' => 'weather', 'state' => 'result', 'input' => [], 'output' => 'sunny'],
+                ['type' => 'tool-weather', 'toolCallId' => 'call_1', 'state' => 'output-available', 'input' => [], 'output' => 'sunny'],
                 ['type' => 'text', 'text' => ' world'],
             ],
         ]);
@@ -53,9 +53,9 @@ class UIMessageTest extends TestCase
         $this->assertSame('Hello', $textParts[0]['text']);
         $this->assertSame(' world', $textParts[1]['text']);
 
-        $toolParts = $msg->getPartsByType('tool-invocation');
+        $toolParts = $msg->getPartsByType('tool-weather');
         $this->assertCount(1, $toolParts);
-        $this->assertSame('weather', $toolParts[0]['toolName']);
+        $this->assertSame('call_1', $toolParts[0]['toolCallId']);
     }
 
     public function testGetTextContent(): void
@@ -81,19 +81,28 @@ class UIMessageTest extends TestCase
             'parts' => [
                 ['type' => 'text', 'text' => 'Let me check...'],
                 [
-                    'type' => 'tool-invocation',
-                    'toolInvocationId' => 'call_1',
-                    'toolName' => 'getWeather',
-                    'state' => 'result',
+                    'type' => 'tool-getWeather',
+                    'toolCallId' => 'call_1',
+                    'state' => 'output-available',
                     'input' => ['city' => 'SF'],
                     'output' => ['temp' => 72],
+                ],
+                [
+                    'type' => 'dynamic-tool',
+                    'toolName' => 'lookup',
+                    'toolCallId' => 'call_2',
+                    'state' => 'output-available',
+                    'input' => [],
+                    'output' => 'ok',
                 ],
             ],
         ]);
 
         $tools = $msg->getToolInvocations();
-        $this->assertCount(1, $tools);
-        $this->assertSame('getWeather', $tools[0]['toolName']);
-        $this->assertSame('result', $tools[0]['state']);
+        $this->assertCount(2, $tools);
+        $this->assertSame('tool-getWeather', $tools[0]['type']);
+        $this->assertSame('output-available', $tools[0]['state']);
+        $this->assertSame('dynamic-tool', $tools[1]['type']);
+        $this->assertSame('lookup', $tools[1]['toolName']);
     }
 }

@@ -454,9 +454,12 @@ function convertUserMessageContent(UIMessage $uiMessage): string|array|null
 /**
  * Convert an assistant UIMessage to model messages.
  *
- * An assistant message may contain text and tool invocations.
- * Tool invocations with state 'result' also generate a separate
- * tool result message.
+ * An assistant message may contain text and tool parts. AI SDK v5+ encodes
+ * tool parts as `tool-<name>` (static) or `dynamic-tool`, with the call state
+ * in `state` (`output-available` / `output-error` once resolved). Each
+ * resolved tool part contributes a `tool-call` to the assistant message and a
+ * `tool-result` to a separate `tool` role message, so the model sees what it
+ * called and what came back on subsequent turns.
  *
  * @param UIMessage $uiMessage
  * @return Message[] One or more messages (assistant + optional tool results).
@@ -477,10 +480,26 @@ function convertAssistantMessage(UIMessage $uiMessage): array
                 'type' => 'text',
                 'text' => $part['text'],
             ];
-        } elseif ($type === 'tool-invocation') {
-            $toolCallId = $part['toolInvocationId'] ?? $part['toolCallId'] ?? '';
-            $toolName = $part['toolName'] ?? '';
-            $input = $part['input'] ?? $part['args'] ?? [];
+        } elseif ($type === 'dynamic-tool' || str_starts_with($type, 'tool-')) {
+            // Only replay tool calls that have resolved to a result. An
+            // assistant tool-call with no matching tool message is a hard
+            // OpenAI 400; incomplete states (input-streaming/input-available)
+            // never reach persisted history, which is saved after the stream
+            // finishes. Legacy v4 parts (state 'call'/'result') fall through
+            // here too and are safely skipped.
+            $state = $part['state'] ?? '';
+            if ($state !== 'output-available' && $state !== 'output-error') {
+                continue;
+            }
+
+            // Static tool parts carry the name in the type suffix
+            // (`tool-<name>`); dynamic-tool parts carry an explicit field.
+            $toolName = $type === 'dynamic-tool'
+                ? ($part['toolName'] ?? '')
+                : substr($type, strlen('tool-'));
+            $toolCallId = $part['toolCallId'] ?? '';
+            // `input` may be absent on output-error; fall back to rawInput.
+            $input = $part['input'] ?? $part['rawInput'] ?? [];
 
             $assistantContent[] = [
                 'type' => 'tool-call',
@@ -489,16 +508,16 @@ function convertAssistantMessage(UIMessage $uiMessage): array
                 'input' => $input,
             ];
 
-            // If the tool invocation has a result, collect it for a tool message
-            $state = $part['state'] ?? '';
-            if ($state === 'result' && array_key_exists('output', $part)) {
-                $toolResults[] = [
-                    'type' => 'tool-result',
-                    'toolCallId' => $toolCallId,
-                    'toolName' => $toolName,
-                    'result' => is_string($part['output']) ? $part['output'] : json_encode($part['output']),
-                ];
-            }
+            $output = $state === 'output-error'
+                ? ($part['errorText'] ?? '')
+                : ($part['output'] ?? '');
+
+            $toolResults[] = [
+                'type' => 'tool-result',
+                'toolCallId' => $toolCallId,
+                'toolName' => $toolName,
+                'result' => is_string($output) ? $output : json_encode($output),
+            ];
         }
     }
 

@@ -20,7 +20,7 @@ class UIMessage
     /**
      * @param string $id        Unique message ID.
      * @param string $role      'user', 'assistant', or 'system'.
-     * @param array  $parts     Array of message parts (text, tool-invocation, file, etc.).
+     * @param array  $parts     Array of message parts (text, tool-<name>, dynamic-tool, file, etc.).
      * @param array  $metadata  Optional metadata attached to the message.
      */
     public function __construct(
@@ -53,7 +53,7 @@ class UIMessage
     /**
      * Get all parts of a specific type.
      *
-     * @param string $type e.g. 'text', 'tool-invocation', 'file', 'reasoning', 'source-url'.
+     * @param string $type e.g. 'text', 'tool-<name>', 'dynamic-tool', 'file', 'reasoning', 'source-url'.
      * @return array
      */
     public function getPartsByType(string $type): array
@@ -76,12 +76,20 @@ class UIMessage
     }
 
     /**
-     * Get all tool invocation parts.
+     * Get all tool parts (AI SDK v5+ `tool-<name>` and `dynamic-tool`).
      *
-     * @return array[] Each element has: toolInvocationId, toolName, state, input, output (if state is 'result').
+     * @return array[] Each element has: type, toolCallId, state, input, and
+     *                 output (state 'output-available') or errorText (state
+     *                 'output-error') once the call resolves.
      */
     public function getToolInvocations(): array
     {
-        return $this->getPartsByType('tool-invocation');
+        return array_values(array_filter(
+            $this->parts,
+            static function (array $part): bool {
+                $type = $part['type'] ?? '';
+                return $type === 'dynamic-tool' || str_starts_with($type, 'tool-');
+            },
+        ));
     }
 }
