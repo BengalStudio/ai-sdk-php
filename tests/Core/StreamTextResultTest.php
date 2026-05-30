@@ -524,6 +524,12 @@ class StreamTextResultTest extends TestCase
 
         $result = $this->createStreamResult([
             ['type' => 'text-delta', 'textDelta' => 'Looking it up.'],
+            // Model-level tool input streaming so the strict guard also runs
+            // over the emitted `tool-input-start` / `tool-input-delta` wire
+            // chunks (not just the `tool-call`-derived `tool-input-available`).
+            ['type' => 'tool-input-start', 'id' => 'call_strict', 'toolName' => 'getWeather', 'step' => 0],
+            ['type' => 'tool-input-delta', 'id' => 'call_strict', 'delta' => '{"city"', 'step' => 0],
+            ['type' => 'tool-input-delta', 'id' => 'call_strict', 'delta' => ':"BD"}', 'step' => 0],
             [
                 'type' => 'tool-call',
                 'toolCallId' => 'call_strict',

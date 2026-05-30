@@ -301,11 +301,34 @@ class StreamText
                         }
                         break;
 
+                    case 'tool-input-start':
+                        // Tool-call argument streaming has begun (model-level).
+                        // Forward unchanged — keep the language-model `id`/`delta`
+                        // keys; the UI-stream serializer renames them to
+                        // `toolCallId`/`inputTextDelta`. (Vercel keeps LM-level
+                        // keys through the core too.)
+                        yield array_merge($chunk, ['step' => $step]);
+                        if ($this->onChunk !== null) {
+                            ($this->onChunk)($chunk);
+                        }
+                        break;
+
+                    case 'tool-input-delta':
+                    // `tool-call-delta` is a back-compat alias: no current
+                    // provider emits it; both providers emit `tool-input-delta`.
                     case 'tool-call-delta':
                         yield array_merge($chunk, ['step' => $step]);
                         if ($this->onChunk !== null) {
                             ($this->onChunk)($chunk);
                         }
+                        break;
+
+                    case 'tool-input-end':
+                        // Forwarded on the full stream so transforms/consumers
+                        // see it, but deliberately NOT surfaced to onChunk and
+                        // dropped by the serializer — wire completion is signaled
+                        // by tool-call → tool-input-available (Vercel parity).
+                        yield array_merge($chunk, ['step' => $step]);
                         break;
 
                     case 'finish':

@@ -444,7 +444,9 @@ class StreamTextResult
 
                     case 'tool-input-delta':
                     case 'tool-call-delta':
-                        // Model-level tool input streaming delta.
+                        // Model-level tool input streaming delta. (`tool-call-delta`
+                        // is a legacy alias kept for back-compat — no current
+                        // provider emits it.)
                         if (!$stepOpen) {
                             $this->writeSSE($output, ['type' => 'start-step']);
                             $stepOpen = true;
