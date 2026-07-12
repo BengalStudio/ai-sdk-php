@@ -1,0 +1,26 @@
+# Keep the Composer distribution lean.
+#
+# Paths marked `export-ignore` are omitted from `git archive`, which is what
+# Composer downloads and installs as the package dist. Dependents that bundle
+# this library (e.g. WordPress plugins shipping a production `vendor/`) then
+# receive only runtime code — no test suites, docs, or tooling. This also
+# keeps development-only PHP (test/harness files that use functions like
+# `eval`/`exec`) out of downstream security scans.
+#
+# Ships: src/, composer.json, LICENSE.md, index.php. Everything below is dev-only.
+
+/.gitattributes  export-ignore
+/.gitignore      export-ignore
+/.github         export-ignore
+/.claude         export-ignore
+/.DS_Store       export-ignore
+/.env            export-ignore
+/.env.local      export-ignore
+/.phpunit.cache  export-ignore
+/composer.lock   export-ignore
+/docs            export-ignore
+/plans           export-ignore
+/temp            export-ignore
+/tests           export-ignore
+/phpunit.xml     export-ignore
+/README.md       export-ignore
