@@ -195,12 +195,13 @@ class ConvertToModelMessagesTest extends TestCase
         $this->assertSame('results', $messages[1]->content[0]['result']);
     }
 
+    /**
+     * Each `step-start` opens a new call/result pair, so a turn that called
+     * two tools and then answered replays as five messages in causal order —
+     * not one assistant message holding all of it.
+     */
     public function testConvertsMultiStepToolTurn(): void
     {
-        // Two resolved tool steps in one assistant turn (step-start markers
-        // separate them). The minimal converter collapses them into one
-        // assistant message (both tool-calls) + one tool message (both
-        // results) — well-formed for OpenAI: every tool_call_id is answered.
         $uiMessages = [
             [
                 'id' => 'msg_1',
@@ -210,6 +211,7 @@ class ConvertToModelMessagesTest extends TestCase
                     ['type' => 'tool-alpha', 'toolCallId' => 'c1', 'state' => 'output-available', 'input' => [], 'output' => 'r1'],
                     ['type' => 'step-start'],
                     ['type' => 'tool-beta', 'toolCallId' => 'c2', 'state' => 'output-available', 'input' => [], 'output' => 'r2'],
+                    ['type' => 'step-start'],
                     ['type' => 'text', 'text' => 'Done'],
                 ],
             ],
@@ -217,23 +219,138 @@ class ConvertToModelMessagesTest extends TestCase
 
         $messages = convertToModelMessages($uiMessages);
 
-        $this->assertCount(2, $messages);
+        $this->assertSame(
+            ['assistant', 'tool', 'assistant', 'tool', 'assistant'],
+            array_map(fn($m) => $m->role, $messages),
+        );
 
-        // Assistant: two tool-calls + the final text.
-        $this->assertSame('assistant', $messages[0]->role);
-        $toolCalls = array_values(array_filter(
-            $messages[0]->content,
-            fn($c) => ($c['type'] ?? '') === 'tool-call',
-        ));
-        $this->assertCount(2, $toolCalls);
-        $this->assertSame('c1', $toolCalls[0]['toolCallId']);
-        $this->assertSame('c2', $toolCalls[1]['toolCallId']);
+        $this->assertSame('c1', $messages[0]->content[0]['toolCallId']);
+        $this->assertSame('c1', $messages[1]->content[0]['toolCallId']);
+        $this->assertSame('c2', $messages[2]->content[0]['toolCallId']);
+        $this->assertSame('c2', $messages[3]->content[0]['toolCallId']);
 
-        // Tool: both results, in order.
-        $this->assertSame('tool', $messages[1]->role);
+        // The answer lands after the result that produced it.
+        $this->assertSame('Done', $messages[4]->content);
+    }
+
+    /**
+     * The shape a search-then-answer turn actually persists as. Flattening it
+     * put the answer ahead of the tool result, which a provider that pairs a
+     * call to its result positionally reads as the model answering early.
+     */
+    public function testToolResultPrecedesTheAnswerItProduced(): void
+    {
+        $messages = convertToModelMessages([
+            [
+                'id' => 'msg_1',
+                'role' => 'assistant',
+                'parts' => [
+                    ['type' => 'step-start'],
+                    ['type' => 'tool-search', 'toolCallId' => 'c1', 'state' => 'output-available', 'input' => [], 'output' => 'r1'],
+                    ['type' => 'step-start'],
+                    ['type' => 'text', 'text' => 'Here are some products.'],
+                ],
+            ],
+        ]);
+
+        $this->assertSame(['assistant', 'tool', 'assistant'], array_map(fn($m) => $m->role, $messages));
+        $this->assertSame('tool-call', $messages[0]->content[0]['type']);
+        $this->assertSame('Here are some products.', $messages[2]->content);
+    }
+
+    /**
+     * Narration before a call belongs to that call's step, ahead of it.
+     */
+    public function testTextBeforeAToolCallStaysInThatStep(): void
+    {
+        $messages = convertToModelMessages([
+            [
+                'id' => 'msg_1',
+                'role' => 'assistant',
+                'parts' => [
+                    ['type' => 'step-start'],
+                    ['type' => 'text', 'text' => 'Let me look.'],
+                    ['type' => 'tool-search', 'toolCallId' => 'c1', 'state' => 'output-available', 'input' => [], 'output' => 'r1'],
+                    ['type' => 'step-start'],
+                    ['type' => 'text', 'text' => 'Found it.'],
+                ],
+            ],
+        ]);
+
+        $this->assertSame(['assistant', 'tool', 'assistant'], array_map(fn($m) => $m->role, $messages));
+        $this->assertSame('text', $messages[0]->content[0]['type']);
+        $this->assertSame('Let me look.', $messages[0]->content[0]['text']);
+        $this->assertSame('tool-call', $messages[0]->content[1]['type']);
+    }
+
+    /**
+     * Parallel calls resolve inside one step, so they stay in one pair.
+     */
+    public function testParallelCallsInOneStepShareOneToolMessage(): void
+    {
+        $messages = convertToModelMessages([
+            [
+                'id' => 'msg_1',
+                'role' => 'assistant',
+                'parts' => [
+                    ['type' => 'step-start'],
+                    ['type' => 'tool-a', 'toolCallId' => 'c1', 'state' => 'output-available', 'input' => [], 'output' => 'r1'],
+                    ['type' => 'tool-b', 'toolCallId' => 'c2', 'state' => 'output-available', 'input' => [], 'output' => 'r2'],
+                    ['type' => 'step-start'],
+                    ['type' => 'text', 'text' => 'Both done.'],
+                ],
+            ],
+        ]);
+
+        $this->assertSame(['assistant', 'tool', 'assistant'], array_map(fn($m) => $m->role, $messages));
+        $this->assertCount(2, $messages[0]->content);
         $this->assertCount(2, $messages[1]->content);
         $this->assertSame('c1', $messages[1]->content[0]['toolCallId']);
         $this->assertSame('c2', $messages[1]->content[1]['toolCallId']);
+    }
+
+    /**
+     * History written before step markers were persisted forms one step, so
+     * it converts exactly as it did before.
+     */
+    public function testPartsWithoutStepMarkersConvertAsASingleStep(): void
+    {
+        $messages = convertToModelMessages([
+            [
+                'id' => 'msg_1',
+                'role' => 'assistant',
+                'parts' => [
+                    ['type' => 'tool-search', 'toolCallId' => 'c1', 'state' => 'output-available', 'input' => [], 'output' => 'r1'],
+                    ['type' => 'text', 'text' => 'Here you go.'],
+                ],
+            ],
+        ]);
+
+        $this->assertSame(['assistant', 'tool'], array_map(fn($m) => $m->role, $messages));
+        $this->assertCount(2, $messages[0]->content);
+    }
+
+    /**
+     * A step holding nothing replayable contributes no message — an empty
+     * assistant message is rejected by several providers.
+     */
+    public function testStepsWithNothingReplayableAreDropped(): void
+    {
+        $messages = convertToModelMessages([
+            [
+                'id' => 'msg_1',
+                'role' => 'assistant',
+                'parts' => [
+                    ['type' => 'step-start'],
+                    ['type' => 'tool-pending', 'toolCallId' => 'c1', 'state' => 'input-available', 'input' => []],
+                    ['type' => 'step-start'],
+                    ['type' => 'text', 'text' => 'Answer.'],
+                ],
+            ],
+        ]);
+
+        $this->assertCount(1, $messages);
+        $this->assertSame('Answer.', $messages[0]->content);
     }
 
     public function testConvertsAssistantTextOnlyAsString(): void
