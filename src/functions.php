@@ -461,18 +461,81 @@ function convertUserMessageContent(UIMessage $uiMessage): string|array|null
  * `tool-result` to a separate `tool` role message, so the model sees what it
  * called and what came back on subsequent turns.
  *
+ * The parts are segmented on `step-start` first. A message that called a tool
+ * and then answered holds both in one parts array, so flattening it would
+ * replay the answer *before* the result that produced it. Providers that pair
+ * a call to its result positionally rather than by id read that as the model
+ * answering ahead of the tool, and degrade.
+ *
  * @param UIMessage $uiMessage
- * @return Message[] One or more messages (assistant + optional tool results).
+ * @return Message[] One or more messages (assistant + optional tool results, per step).
  *
  * @internal
  */
 function convertAssistantMessage(UIMessage $uiMessage): array
 {
     $messages = [];
+
+    foreach (splitPartsIntoSteps($uiMessage->parts) as $step) {
+        foreach (convertAssistantStep($step) as $message) {
+            $messages[] = $message;
+        }
+    }
+
+    return $messages;
+}
+
+/**
+ * Split UI message parts on `step-start` boundaries.
+ *
+ * Parts before the first boundary belong to the first step, so a message with
+ * no `step-start` at all yields a single step holding everything — which is
+ * what history persisted before step markers were written looks like.
+ *
+ * @param array $parts
+ * @return array[] One parts array per step, empty steps dropped.
+ *
+ * @internal
+ */
+function splitPartsIntoSteps(array $parts): array
+{
+    $steps = [];
+    $current = [];
+
+    foreach ($parts as $part) {
+        if (($part['type'] ?? '') === 'step-start') {
+            if (!empty($current)) {
+                $steps[] = $current;
+            }
+            $current = [];
+            continue;
+        }
+
+        $current[] = $part;
+    }
+
+    if (!empty($current)) {
+        $steps[] = $current;
+    }
+
+    return $steps;
+}
+
+/**
+ * Convert one step's parts to an assistant message plus its tool results.
+ *
+ * @param array $parts
+ * @return Message[]
+ *
+ * @internal
+ */
+function convertAssistantStep(array $parts): array
+{
+    $messages = [];
     $assistantContent = [];
     $toolResults = [];
 
-    foreach ($uiMessage->parts as $part) {
+    foreach ($parts as $part) {
         $type = $part['type'] ?? '';
 
         if ($type === 'text' && ($part['text'] ?? '') !== '') {
