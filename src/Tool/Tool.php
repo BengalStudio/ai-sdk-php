@@ -26,12 +26,20 @@ namespace BengalStudio\AI\Tool;
  */
 class Tool
 {
+    /**
+     * @param null|bool|\Closure $needsApproval Whether a call must be approved
+     *        by a human before it runs. `null`/`false` executes normally;
+     *        `true` requests approval under a generated id; a closure
+     *        `fn(array $input, array $options): bool|string` decides per call,
+     *        and may return a **string** to supply the approval id itself.
+     */
     public function __construct(
         public readonly ?string $description = null,
         public readonly ?array $inputSchema = null,
         public readonly ?\Closure $execute = null,
         public readonly ?string $type = null,
         public readonly ?array $providerOptions = null,
+        public readonly null|bool|\Closure $needsApproval = null,
     ) {}
 
     /**
@@ -42,6 +50,7 @@ class Tool
         ?array $inputSchema = null,
         ?\Closure $execute = null,
         ?array $providerOptions = null,
+        null|bool|\Closure $needsApproval = null,
     ): self {
         return new self(
             description: $description,
@@ -49,7 +58,45 @@ class Tool
             execute: $execute,
             type: 'function',
             providerOptions: $providerOptions,
+            needsApproval: $needsApproval,
         );
+    }
+
+    /**
+     * Whether this call needs a human decision, and under which id.
+     *
+     * Returns `false` to execute normally, `true` to request approval under an
+     * id the caller generates, or a string to request approval under *that* id.
+     *
+     * The string form is a deliberate extension of the TypeScript SDK, where
+     * the approval id is always generated internally. It exists so a consumer
+     * can bind an approval to a record it already owns — a queue row, an audit
+     * entry — instead of keeping a side table mapping one id to the other.
+     *
+     * @param array $input   The tool call input.
+     * @param array $options Execution options (`toolCallId`).
+     * @return bool|string
+     */
+    public function resolveApproval(array $input, array $options = []): bool|string
+    {
+        if ($this->needsApproval === null || $this->needsApproval === false) {
+            return false;
+        }
+
+        if ($this->needsApproval === true) {
+            return true;
+        }
+
+        $decision = ($this->needsApproval)($input, $options);
+
+        // An empty string is a policy that meant to supply an id and failed to.
+        // Reading it as "no approval needed" would turn a broken policy into an
+        // unsupervised write, so it falls back to a generated id instead.
+        if (is_string($decision)) {
+            return $decision !== '' ? $decision : true;
+        }
+
+        return (bool) $decision;
     }
 
     /**

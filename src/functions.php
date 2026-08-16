@@ -255,9 +255,11 @@ function embedMany(array $options): EmbedManyResult
  * Define a tool for use with generateText or streamText.
  *
  * @param array $options {
- *   @type string   $description Human-readable tool description.
- *   @type array    $parameters  JSON Schema for input parameters.
- *   @type \Closure $execute     Function that executes the tool: fn(array $args) => mixed
+ *   @type string             $description   Human-readable tool description.
+ *   @type array              $parameters    JSON Schema for input parameters.
+ *   @type \Closure           $execute       Function that executes the tool: fn(array $args) => mixed
+ *   @type bool|\Closure|null $needsApproval Hold the call for a human decision.
+ *                                           See {@see Tool::resolveApproval()}.
  * }
  */
 function tool(array $options): Tool
@@ -266,6 +268,7 @@ function tool(array $options): Tool
         description: $options['description'] ?? '',
         inputSchema: $options['parameters'] ?? [],
         execute: $options['execute'] ?? null,
+        needsApproval: $options['needsApproval'] ?? null,
     );
 }
 
@@ -544,14 +547,20 @@ function convertAssistantStep(array $parts): array
                 'text' => $part['text'],
             ];
         } elseif ($type === 'dynamic-tool' || str_starts_with($type, 'tool-')) {
-            // Only replay tool calls that have resolved to a result. An
-            // assistant tool-call with no matching tool message is a hard
-            // OpenAI 400; incomplete states (input-streaming/input-available)
-            // never reach persisted history, which is saved after the stream
-            // finishes. Legacy v4 parts (state 'call'/'result') fall through
-            // here too and are safely skipped.
+            // Only replay tool calls that have resolved, or that carry a human's
+            // decision. An assistant tool-call with no matching tool message is
+            // a hard OpenAI 400; incomplete states
+            // (input-streaming/input-available) never reach persisted history,
+            // which is saved after the stream finishes. Legacy v4 parts (state
+            // 'call'/'result') fall through here too and are safely skipped.
+            //
+            // `approval-requested` is skipped with them, and deliberately: it is
+            // a call nobody has decided yet, so it has no result and will never
+            // get one unless a human acts. Replaying it would strand the model
+            // with an unanswered call.
             $state = $part['state'] ?? '';
-            if ($state !== 'output-available' && $state !== 'output-error') {
+            $replayable = ['output-available', 'output-error', 'approval-responded'];
+            if (!in_array($state, $replayable, true)) {
                 continue;
             }
 
@@ -570,6 +579,32 @@ function convertAssistantStep(array $parts): array
                 'toolName' => $toolName,
                 'input' => $input,
             ];
+
+            if ($state === 'approval-responded') {
+                // The decision, not a result: the call has not run yet.
+                // `StreamText::settleApprovals()` turns this into a real
+                // `tool-result` — executing or refusing — before any provider
+                // sees the conversation.
+                //
+                // It carries more than the AI SDK's documented shape
+                // (`{type, approvalId, approved, reason}`): the call id, tool
+                // name and input travel with it, because by the time the
+                // decision arrives the turn that produced the call is over and
+                // there is nothing left to look them up in.
+                $approval = is_array($part['approval'] ?? null) ? $part['approval'] : [];
+
+                $toolResults[] = array_filter([
+                    'type' => 'tool-approval-response',
+                    'toolCallId' => $toolCallId,
+                    'toolName' => $toolName,
+                    'input' => $input,
+                    'approvalId' => (string) ($approval['id'] ?? ''),
+                    'approved' => (bool) ($approval['approved'] ?? false),
+                    'reason' => isset($approval['reason']) ? (string) $approval['reason'] : null,
+                ], fn($v) => $v !== null);
+
+                continue;
+            }
 
             $output = $state === 'output-error'
                 ? ($part['errorText'] ?? '')

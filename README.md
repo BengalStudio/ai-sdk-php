@@ -380,6 +380,24 @@ $calculator = tool([
 ]);
 ```
 
+### Tool approvals
+
+A tool that should not run unsupervised can be held for a human decision. The
+call is announced and the run ends there; the tool executes only once the
+decision comes back on a later request.
+
+```php
+$deletePost = tool([
+    'description'   => 'Delete a post',
+    'parameters'    => ['type' => 'object', 'properties' => ['id' => ['type' => 'integer']]],
+    'execute'       => fn(array $args) => wp_delete_post($args['id']),
+    'needsApproval' => true,   // or fn(array $input): bool|string
+]);
+```
+
+See [docs/tools.md](docs/tools.md#tool-approvals) for the full round trip,
+including how to supply your own approval id and redeem it when the call runs.
+
 ## Provider Registry
 
 Register multiple providers and resolve models using string IDs:

@@ -502,6 +502,96 @@ class StreamTextResultTest extends TestCase
      * usage); extend the allow-list and the fixture together if new chunk
      * types are added.
      */
+    public function testToUIMessageStreamResponseUsesTheSuppliedMessageId(): void
+    {
+        $result = $this->createStreamResult([
+            ['type' => 'text-delta', 'textDelta' => 'Continuing.'],
+            ['type' => 'finish', 'totalUsage' => new LanguageModelUsage(1, 1)],
+        ]);
+
+        $outputFile = tmpfile();
+        $result->toUIMessageStreamResponse(['messageId' => 'msg_existing'], $outputFile);
+
+        fseek($outputFile, 0);
+        $output = stream_get_contents($outputFile);
+        fclose($outputFile);
+
+        $events = $this->parseSSEEvents($output);
+        $start = array_values(array_filter($events, fn($e) => ($e['type'] ?? '') === 'start'))[0];
+
+        // The client applies this id to the message it is continuing. Generating
+        // a fresh one on a resumed run renames that message mid-thread, and any
+        // persistence keyed on the id then writes a second copy of it.
+        $this->assertSame('msg_existing', $start['messageId']);
+    }
+
+    public function testToUIMessageStreamResponseGeneratesAMessageIdWhenNoneIsGiven(): void
+    {
+        $result = $this->createStreamResult([
+            ['type' => 'text-delta', 'textDelta' => 'Fresh.'],
+            ['type' => 'finish', 'totalUsage' => new LanguageModelUsage(1, 1)],
+        ]);
+
+        $outputFile = tmpfile();
+        $result->toUIMessageStreamResponse(output: $outputFile);
+
+        fseek($outputFile, 0);
+        $output = stream_get_contents($outputFile);
+        fclose($outputFile);
+
+        $events = $this->parseSSEEvents($output);
+        $start = array_values(array_filter($events, fn($e) => ($e['type'] ?? '') === 'start'))[0];
+
+        $this->assertStringStartsWith('msg-', $start['messageId']);
+    }
+
+    public function testToUIMessageStreamResponseEmitsApprovalChunks(): void
+    {
+        $result = $this->createStreamResult([
+            [
+                'type' => 'tool-call',
+                'toolCallId' => 'call_1',
+                'toolName' => 'deletePost',
+                'args' => ['id' => 5],
+                'step' => 0,
+            ],
+            [
+                'type' => 'tool-approval-request',
+                'approvalId' => 'approval_1',
+                'toolCallId' => 'call_1',
+                'step' => 0,
+            ],
+            ['type' => 'step-finish', 'step' => 0],
+            ['type' => 'finish', 'totalUsage' => new LanguageModelUsage(5, 5)],
+        ]);
+
+        $outputFile = tmpfile();
+        $result->toUIMessageStreamResponse(output: $outputFile);
+
+        fseek($outputFile, 0);
+        $output = stream_get_contents($outputFile);
+        fclose($outputFile);
+
+        $events = $this->parseSSEEvents($output);
+        $types = array_column($events, 'type');
+
+        // The input is announced so the client can show what would run, then the
+        // approval request instead of a result.
+        $this->assertContains('tool-input-available', $types);
+        $this->assertContains('tool-approval-request', $types);
+        $this->assertNotContains('tool-output-available', $types);
+
+        $this->assertLessThan(
+            array_search('tool-approval-request', $types, true),
+            array_search('tool-input-available', $types, true)
+        );
+
+        $request = $events[array_search('tool-approval-request', $types, true)];
+        $this->assertSame(['type', 'approvalId', 'toolCallId'], array_keys($request));
+        $this->assertSame('approval_1', $request['approvalId']);
+        $this->assertSame('call_1', $request['toolCallId']);
+    }
+
     public function testToUIMessageStreamResponseChunksMatchAiSdkV6StrictSchema(): void
     {
         $allowedKeysByType = [
@@ -519,6 +609,12 @@ class StreamTextResultTest extends TestCase
             'tool-input-delta'      => ['type', 'toolCallId', 'inputTextDelta'],
             'tool-input-available'  => ['type', 'toolCallId', 'toolName', 'input', 'providerExecuted', 'providerMetadata', 'dynamic', 'title'],
             'tool-output-available' => ['type', 'toolCallId', 'output', 'providerExecuted', 'dynamic', 'preliminary'],
+            'tool-output-error'     => ['type', 'toolCallId', 'errorText', 'providerExecuted', 'providerMetadata', 'toolMetadata', 'dynamic'],
+            // Both are `z.strictObject` with exactly these keys. In particular
+            // `tool-output-denied` has NO `reason` — the denial reason belongs
+            // in the tool result the model reads, not on the wire chunk.
+            'tool-output-denied'    => ['type', 'toolCallId'],
+            'tool-approval-request' => ['type', 'approvalId', 'toolCallId'],
             'error'                 => ['type', 'errorText'],
         ];
 
@@ -541,6 +637,26 @@ class StreamTextResultTest extends TestCase
                 'type' => 'tool-result',
                 'toolCallId' => 'call_strict',
                 'result' => ['temp' => 30],
+                'step' => 0,
+            ],
+            // The approval chunks run through the same guard. `reason` is passed
+            // in deliberately — the emitter must drop it, not forward it.
+            [
+                'type' => 'tool-approval-request',
+                'approvalId' => 'approval_strict',
+                'toolCallId' => 'call_gated',
+                'step' => 0,
+            ],
+            [
+                'type' => 'tool-output-denied',
+                'toolCallId' => 'call_gated',
+                'reason' => 'too risky',
+                'step' => 0,
+            ],
+            [
+                'type' => 'tool-output-error',
+                'toolCallId' => 'call_missing',
+                'errorText' => 'Tool "x" is no longer available.',
                 'step' => 0,
             ],
             ['type' => 'step-finish', 'step' => 0, 'finishReason' => 'tool-calls'],

@@ -533,4 +533,108 @@ class ConvertToModelMessagesTest extends TestCase
         $this->assertSame('tool', $messages[2]->role);
         $this->assertSame('user', $messages[3]->role);
     }
+
+    // ─── Tool approvals ───
+
+    public function testDecidedApprovalReplaysAsCallPlusApprovalResponse(): void
+    {
+        $messages = convertToModelMessages([
+            [
+                'id' => 'msg_1',
+                'role' => 'user',
+                'parts' => [['type' => 'text', 'text' => 'delete post 5']],
+            ],
+            [
+                'id' => 'msg_2',
+                'role' => 'assistant',
+                'parts' => [
+                    [
+                        'type' => 'tool-deletePost',
+                        'toolCallId' => 'call_1',
+                        'state' => 'approval-responded',
+                        'input' => ['id' => 5],
+                        'approval' => ['id' => 'approval_1', 'approved' => true, 'reason' => 'ok'],
+                    ],
+                ],
+            ],
+        ]);
+
+        $this->assertCount(3, $messages);
+        $this->assertSame('assistant', $messages[1]->role);
+        $this->assertSame('tool-call', $messages[1]->content[0]['type']);
+        $this->assertSame('call_1', $messages[1]->content[0]['toolCallId']);
+
+        // The decision, not a result — the call has not run yet. It carries
+        // everything StreamText needs to run it, because by the time a decision
+        // arrives the turn that produced the call is over.
+        $this->assertSame('tool', $messages[2]->role);
+        $response = $messages[2]->content[0];
+        $this->assertSame('tool-approval-response', $response['type']);
+        $this->assertSame('approval_1', $response['approvalId']);
+        $this->assertTrue($response['approved']);
+        $this->assertSame('ok', $response['reason']);
+        $this->assertSame('call_1', $response['toolCallId']);
+        $this->assertSame('deletePost', $response['toolName']);
+        $this->assertSame(['id' => 5], $response['input']);
+    }
+
+    public function testDeniedApprovalReplaysWithApprovedFalse(): void
+    {
+        $messages = convertToModelMessages([
+            [
+                'id' => 'msg_1',
+                'role' => 'assistant',
+                'parts' => [
+                    [
+                        'type' => 'tool-deletePost',
+                        'toolCallId' => 'call_1',
+                        'state' => 'approval-responded',
+                        'input' => ['id' => 5],
+                        'approval' => ['id' => 'approval_1', 'approved' => false],
+                    ],
+                ],
+            ],
+        ]);
+
+        $response = $messages[1]->content[0];
+        $this->assertFalse($response['approved']);
+        $this->assertArrayNotHasKey('reason', $response, 'an absent reason is omitted, not sent as null');
+    }
+
+    public function testUndecidedApprovalIsSkippedEntirely(): void
+    {
+        $messages = convertToModelMessages([
+            [
+                'id' => 'msg_1',
+                'role' => 'user',
+                'parts' => [['type' => 'text', 'text' => 'delete post 5']],
+            ],
+            [
+                'id' => 'msg_2',
+                'role' => 'assistant',
+                'parts' => [
+                    ['type' => 'text', 'text' => 'One moment.'],
+                    [
+                        'type' => 'tool-deletePost',
+                        'toolCallId' => 'call_1',
+                        'state' => 'approval-requested',
+                        'input' => ['id' => 5],
+                        'approval' => ['id' => 'approval_1'],
+                    ],
+                ],
+            ],
+        ]);
+
+        // Nobody has decided, so the call has no result and never will unless a
+        // human acts. Replaying it would leave an assistant tool-call with no
+        // matching tool message — a hard 400 from OpenAI.
+        $this->assertCount(2, $messages);
+        $this->assertSame('user', $messages[0]->role);
+        $this->assertSame('assistant', $messages[1]->role);
+        $this->assertSame('One moment.', $messages[1]->content);
+
+        foreach ($messages as $message) {
+            $this->assertNotSame('tool', $message->role);
+        }
+    }
 }

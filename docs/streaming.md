@@ -193,6 +193,11 @@ $result = streamText([
 | `onFinish` | `callable` | Called when done |
 | `experimental_transform` | `\Closure\|array` | Stream transform(s) — see [`smoothStream`](#smoothing-streamed-output) |
 
+`toUIMessageStreamResponse()` additionally accepts `messageId`. Pass the id the
+client sent when a run continues an existing assistant message — a run resumed
+after a [tool approval](tools.md#tool-approvals) does exactly that — otherwise a
+fresh id is generated and the client renames the message it was building.
+
 ## Stream Events Reference
 
 ### `text-delta`
@@ -217,6 +222,35 @@ $result = streamText([
 
 ```php
 ['type' => 'tool-result', 'toolCallId' => '...', 'toolName' => 'weather', 'result' => '72°F']
+```
+
+### `tool-approval-request`
+
+Emitted **instead of** `tool-result` when a tool's `needsApproval` holds the
+call. The tool has not run, and the run ends here. See
+[Tool Approvals](tools.md#tool-approvals).
+
+```php
+['type' => 'tool-approval-request', 'approvalId' => '...', 'toolCallId' => '...']
+```
+
+### `tool-output-denied`
+
+Emitted on resume when a human refused the call.
+
+```php
+['type' => 'tool-output-denied', 'toolCallId' => '...', 'reason' => 'too risky']
+```
+
+> The `reason` is dropped from the UI-message-stream chunk — the AI SDK v6
+> schema for `tool-output-denied` is a strict object of `{type, toolCallId}`,
+> and any extra key fails the client's parse. The reason still reaches the model
+> in the tool result.
+
+### `tool-output-error`
+
+```php
+['type' => 'tool-output-error', 'toolCallId' => '...', 'errorText' => '...']
 ```
 
 ### `finish`

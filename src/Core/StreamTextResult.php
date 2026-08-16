@@ -311,6 +311,11 @@ class StreamTextResult
      *   @type bool          $sendReasoning    Forward reasoning parts (default: false).
      *   @type bool          $sendSources      Forward source parts (default: false).
      *   @type \Closure|null $onError          fn(mixed $error): string — custom error message.
+     *   @type string|null   $messageId        Id for the assistant message this
+     *                                         stream writes into. Pass the id the
+     *                                         client sent when continuing an
+     *                                         existing message; omit to generate
+     *                                         a fresh one.
      * }
      * @param resource|null $output Defaults to php://output if null.
      */
@@ -331,7 +336,17 @@ class StreamTextResult
         $sendSources = $options['sendSources'] ?? false;
         $onError = $options['onError'] ?? null;
 
-        $messageId = IdGenerator::createId('msg');
+        // The `start` chunk *names* the message the client is assembling, and
+        // the client applies that name to whatever message it is continuing. A
+        // run resumed after an approval continues the previous assistant
+        // message, so generating a fresh id here would rename it mid-thread —
+        // and any persistence keyed on the id would write a second copy and
+        // orphan the first. Callers that know which message they are continuing
+        // pass its id.
+        $messageId = $options['messageId'] ?? null;
+        $messageId = is_string($messageId) && $messageId !== ''
+            ? $messageId
+            : IdGenerator::createId('msg');
         $textBlockId = null;
         $inTextBlock = false;
         $messageSent = false;
@@ -501,6 +516,41 @@ class StreamTextResult
                             'type' => 'tool-output-available',
                             'toolCallId' => $chunk['toolCallId'] ?? '',
                             'output' => $chunk['result'] ?? $chunk['output'] ?? null,
+                        ]);
+                        break;
+
+                    case 'tool-approval-request':
+                        // The call is held for a human. Emitted instead of a
+                        // result, never alongside one: the client puts the part
+                        // in `approval-requested` and waits for a decision.
+                        $this->writeSSE($output, [
+                            'type' => 'tool-approval-request',
+                            'approvalId' => $chunk['approvalId'] ?? '',
+                            'toolCallId' => $chunk['toolCallId'] ?? '',
+                        ]);
+                        break;
+
+                    case 'tool-output-denied':
+                        // A refusal is not a failure, and the AI SDK gives it
+                        // its own state so clients can say so.
+                        //
+                        // `reason` is deliberately not forwarded: the v6 chunk
+                        // is `z.strictObject({type, toolCallId})`, so adding it
+                        // would fail the client's zod parse and turn an ordinary
+                        // denial into a phantom error. The client already holds
+                        // the reason — it sent it — and the model gets it in the
+                        // tool result text.
+                        $this->writeSSE($output, [
+                            'type' => 'tool-output-denied',
+                            'toolCallId' => $chunk['toolCallId'] ?? '',
+                        ]);
+                        break;
+
+                    case 'tool-output-error':
+                        $this->writeSSE($output, [
+                            'type' => 'tool-output-error',
+                            'toolCallId' => $chunk['toolCallId'] ?? '',
+                            'errorText' => $chunk['errorText'] ?? 'The tool call failed.',
                         ]);
                         break;
 
