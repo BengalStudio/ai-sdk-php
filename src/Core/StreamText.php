@@ -236,7 +236,15 @@ class StreamText
         array $validatedSettings,
         array $prepared,
     ): \Generator {
-        $currentMessages = $promptMessages;
+        // A run that was held for approval resumes here: decisions the client
+        // sent back are settled — executed or denied — before the model is
+        // asked anything, so it opens the turn with the results in hand.
+        $settle = $this->settleApprovals($promptMessages);
+        foreach ($settle as $settledChunk) {
+            yield $settledChunk;
+        }
+        $currentMessages = $settle->getReturn();
+
         $totalUsage = new LanguageModelUsage();
 
         for ($step = 0; $step < $this->maxSteps; $step++) {
@@ -350,11 +358,23 @@ class StreamText
                 $totalUsage = $totalUsage->add($usage);
             }
 
-            // Execute tool calls if any
+            // Execute tool calls if any — unless a human has to decide first.
             $toolResults = [];
+            $awaitingApproval = false;
             if (!empty($toolCalls) && $this->tools !== null) {
                 foreach ($toolCalls as $toolCallData) {
                     $toolCall = ToolCall::fromContentPart($toolCallData);
+
+                    // Asked before execution, never after: a tool that needs
+                    // approval must not run and ask later. Ungated calls in the
+                    // same step still run — only the gated one is held.
+                    $approval = ToolPreparer::approvalFor($toolCall, $this->tools);
+                    if ($approval !== null) {
+                        $awaitingApproval = true;
+                        yield array_merge($approval->toStreamChunk(), ['step' => $step]);
+                        continue;
+                    }
+
                     $toolResult = ToolPreparer::executeToolCall($toolCall, $this->tools);
 
                     if ($toolResult !== null) {
@@ -389,6 +409,14 @@ class StreamText
                 ]);
             }
 
+            // A call waiting on a human ends the run. There is nothing to feed
+            // the model, and letting it take another step would have it narrate
+            // a decision nobody has made yet — the turn should end quietly with
+            // the request on screen.
+            if ($awaitingApproval) {
+                break;
+            }
+
             // Continue with tool results in next step?
             if (!empty($toolResults) && $step < $this->maxSteps - 1) {
                 $currentMessages[] = Message::assistant(
@@ -407,5 +435,142 @@ class StreamText
             'type' => 'finish',
             'totalUsage' => $totalUsage,
         ];
+    }
+
+    /**
+     * Settle approval decisions carried in the incoming messages.
+     *
+     * A run stopped by {@see ToolPreparer::approvalFor()} leaves a tool call
+     * unresolved. When the decision comes back, `convertToModelMessages()`
+     * replays it as a `tool-approval-response` part; this turns each one into a
+     * real `tool-result` before the first model call, so no provider ever sees
+     * the approval protocol.
+     *
+     * Yields the stream chunks the client needs to close the card it is still
+     * showing, and returns the rewritten messages via `getReturn()`.
+     *
+     * Every branch produces a `tool-result` part, including the failures. An
+     * assistant `tool-call` left without one is a hard 400 from OpenAI, so
+     * "could not settle this" has to still resolve the call — saying so in the
+     * result the model reads.
+     *
+     * @param Message[] $messages
+     * @return \Generator<int, array, mixed, Message[]>
+     */
+    private function settleApprovals(array $messages): \Generator
+    {
+        $settled = [];
+
+        foreach ($messages as $message) {
+            if ($message->role !== 'tool' || !is_array($message->content)) {
+                $settled[] = $message;
+                continue;
+            }
+
+            $content = [];
+            $rewritten = false;
+
+            foreach ($message->content as $part) {
+                if (!is_array($part) || ($part['type'] ?? '') !== 'tool-approval-response') {
+                    $content[] = $part;
+                    continue;
+                }
+
+                $rewritten = true;
+
+                $toolCallId = (string) ($part['toolCallId'] ?? '');
+                $toolName = (string) ($part['toolName'] ?? '');
+                $approved = (bool) ($part['approved'] ?? false);
+                $reason = isset($part['reason']) ? (string) $part['reason'] : null;
+                $input = $part['input'] ?? [];
+                $tool = $this->tools[$toolName] ?? null;
+
+                if ($toolCallId === '') {
+                    // Nothing to resolve and nothing to patch on the client: the
+                    // part cannot be tied back to a call. Drop it rather than
+                    // inventing a result for a call we cannot name.
+                    continue;
+                }
+
+                if (!$approved) {
+                    $text = $reason !== null && $reason !== ''
+                        ? 'The user denied this tool call: ' . $reason
+                        : 'The user denied this tool call.';
+
+                    yield [
+                        'type' => 'tool-output-denied',
+                        'toolCallId' => $toolCallId,
+                        'reason' => $reason,
+                    ];
+
+                    $content[] = [
+                        'type' => 'tool-result',
+                        'toolCallId' => $toolCallId,
+                        'result' => $text,
+                    ];
+                    continue;
+                }
+
+                if ($tool === null || $tool->execute === null) {
+                    // Approved, but the tool is gone — renamed, or not resolved
+                    // for this request. The human's decision cannot be honoured,
+                    // and pretending otherwise would be worse than saying so.
+                    $text = sprintf('Tool "%s" is no longer available, so the approved call did not run.', $toolName);
+
+                    yield [
+                        'type' => 'tool-output-error',
+                        'toolCallId' => $toolCallId,
+                        'errorText' => $text,
+                    ];
+
+                    $content[] = [
+                        'type' => 'tool-result',
+                        'toolCallId' => $toolCallId,
+                        'result' => $text,
+                    ];
+                    continue;
+                }
+
+                $toolResult = ToolPreparer::executeToolCall(
+                    new ToolCall(
+                        toolCallId: $toolCallId,
+                        toolName: $toolName,
+                        input: $input,
+                    ),
+                    $this->tools,
+                    // What released the call, handed to the tool so a consumer
+                    // can redeem the approval it recorded when it asked.
+                    array_filter([
+                        'id' => $part['approvalId'] ?? null,
+                        'approved' => true,
+                        'reason' => $reason,
+                    ], fn($v) => $v !== null),
+                );
+
+                yield [
+                    'type' => 'tool-result',
+                    'toolCallId' => $toolResult->toolCallId,
+                    'toolName' => $toolResult->toolName,
+                    'result' => $toolResult->output,
+                ];
+
+                $content[] = $toolResult->toMessagePart();
+            }
+
+            // Untouched messages pass through as they are, keeping whatever
+            // provider options they carried.
+            if (!$rewritten) {
+                $settled[] = $message;
+                continue;
+            }
+
+            // A tool message emptied by the drop above would be an empty
+            // `role: tool` turn, which providers reject.
+            if (!empty($content)) {
+                $settled[] = new Message('tool', $content, $message->providerOptions);
+            }
+        }
+
+        return $settled;
     }
 }
